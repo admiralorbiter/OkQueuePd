@@ -26,8 +26,16 @@ This roadmap guides the implementation of a full agent-based matchmaking simulat
   - Per-playlist blowout rate tracking
   - Team skill difference distribution tracking
   - Frontend charts for blowout metrics and severity distribution
+- ✅ **Slice D: Performance Model & Skill Evolution**
+  - Per-match performance model with configurable noise
+  - Skill update rule: \(s_i^+ = s_i^- + \alpha(\hat{y}_i - \mathbb{E}[Y_i])\)
+  - Batch-based percentile recalculation
+  - Skill distribution evolution tracking over time
+  - Frontend visualizations: skill evolution time series, current skill distribution, performance distribution
+  - Toggle between static and evolving skill modes
+  - Skill drift summary metrics
 
-**Remaining Slices**: D, E, F, G, H (optional)
+**Remaining Slices**: E, F, G, H (optional)
 
 ### Relationship to Whitepaper
 
@@ -51,6 +59,9 @@ The Rust/WASM engine (`src/`) already implements:
 - ✅ Quality scoring (ping, skill balance, wait time)
 - ✅ Team balancing (exact partitioning for 6v6, snake draft for large playlists)
 - ✅ Match outcomes with configurable logistic and blowout severity classification
+- ✅ Performance model with per-match performance indices
+- ✅ Skill evolution system with update rule and batch percentile recalculation
+- ✅ Skill distribution evolution tracking over time
 - ✅ Basic retention/continuation logic
 - ✅ Per-bucket statistics
 - ✅ Blowout severity tracking and per-playlist metrics
@@ -63,6 +74,9 @@ The React frontend (`web/src/`) provides:
 - ✅ Party metrics and visualizations
 - ✅ Blowout rate by playlist and severity distribution charts
 - ✅ Team balancing configuration controls
+- ✅ Skill evolution visualizations (time series, current distribution, drift metrics)
+- ✅ Performance distribution charts
+- ✅ Skill evolution toggle and configuration controls
 
 ---
 
@@ -73,14 +87,14 @@ The React frontend (`web/src/`) provides:
 | **Player State Machine** | §2.5 | `PlayerState` enum, 4-state loop | ✅ Complete |
 | **Player Attributes** | §2.2 | `Player` struct (location, platform, input, skill, playlists) | ✅ Complete |
 | **DC & Ping Model** | §2.3 | `DataCenter`, `dc_pings`, `acceptable_dcs()` with backoff | ✅ Complete |
-| **Skill System** | §2.4 | Raw skill, percentile, buckets | ⚠️ Static (no evolution) |
+| **Skill System** | §2.4 | Raw skill, percentile, buckets, skill evolution | ✅ Complete |
 | **Search Objects** | §2.7 | `SearchObject` struct | ✅ Complete (supports solo and parties) |
 | **Distance Metric** | §3.1 | `calculate_distance()` with weights | ✅ Complete |
 | **Feasibility Checks** | §3.3 | `check_feasibility()` implements 6 constraints | ✅ Complete (units fixed, skill range check corrected) |
 | **Quality Score** | §3.4 | `calculate_quality()` with 3 components | ✅ Complete |
 | **Team Balancing** | §3.6 | `balance_teams()` with exact partitioning for 6v6 | ✅ Complete (exact for small, snake draft for large) |
-| **Match Outcomes** | §3.7 | `determine_outcome()` with configurable logistic and blowout severity | ⚠️ No performance model/KPM |
-| **Skill Evolution** | §3.7 | None | ❌ Missing |
+| **Match Outcomes** | §3.7 | `determine_outcome()` with configurable logistic and blowout severity | ✅ Complete (includes performance model) |
+| **Skill Evolution** | §3.7 | Performance model and skill update rule implemented | ✅ Complete |
 | **Retention Model** | §3.8 | Inline continuation probability | ⚠️ Ad-hoc (not formal logistic) |
 | **Parties** | §2.4, §2.7 | `Party` struct with full integration | ✅ Complete |
 | **Region Graph** | §2.3, §6.1 | Regions as strings, no adjacency | ⚠️ Implicit (needs explicit) |
@@ -256,42 +270,56 @@ Each vertical slice is a self-contained feature that touches engine, metrics, an
 
 ---
 
-### Slice D: Performance Model & Skill Evolution
+### Slice D: Performance Model & Skill Evolution ✅ **COMPLETE**
 
 **Whitepaper References**: §2.4 (skill), §3.7 (performance, skill update), §6.4 (skill evolution)
 
+**Status**: ✅ **Completed**
+
 **Goals**:
-- Add per-match performance model (KPM/SPM or performance index)
-- Implement skill update rule based on performance vs expectation
-- Track skill distribution evolution over time
+- ✅ Add per-match performance model (KPM/SPM or performance index)
+- ✅ Implement skill update rule based on performance vs expectation
+- ✅ Track skill distribution evolution over time
 
 **Engine Work**:
-- **`src/types.rs`**:
-  - Add to `Player`: `recent_performance: Vec<f64>` (performance indices from recent matches)
-  - Add to `Match`: `player_performances: HashMap<usize, f64>` (performance index per player)
-  - Add to `MatchmakingConfig`: `skill_learning_rate: f64` (α in update rule), `performance_noise_std: f64`
-- **`src/simulation.rs`**:
-  - Add function `generate_performance(player: &Player, lobby_avg_skill: f64, playlist: Playlist, rng: &mut impl Rng) -> f64`:
-    - Base performance = \(f_{\text{perf}}(s_i, \bar{s}_{\text{lobby}}, m)\)
-    - Add noise: \(\epsilon_i \sim \mathcal{N}(0, \sigma^2)\)
-    - Return normalized performance index (0-1 scale)
-  - After match completion, compute performance for each player and store in `Match.player_performances`
-  - Implement skill update: \(s_i^+ = s_i^- + \alpha (\hat{y}_i - \mathbb{E}[Y_i \mid s_i, \text{lobby}])\)
-    - \(\hat{y}_i\) = normalized performance vs lobby average
-    - \(\mathbb{E}[Y_i]\) = expected performance (function of skill and lobby context)
-  - After batches of matches (every N ticks or every M matches), call `update_skill_percentiles()` to recompute percentiles and buckets
-  - Add to `SimulationStats`: `skill_distribution_over_time: Vec<(u64, Vec<(usize, f64)>)>` (time series of bucket means)
+- ✅ **`src/types.rs`**:
+  - Added to `Player`: `recent_performance: Vec<f64>` (performance indices from recent matches)
+  - Added to `Match`: `player_performances: HashMap<usize, f64>` (performance index per player)
+  - Added to `MatchmakingConfig`: `skill_learning_rate: f64` (α in update rule, default 0.01), `performance_noise_std: f64` (default 0.15), `enable_skill_evolution: bool` (default true), `skill_update_batch_size: usize` (default 10)
+  - Added to `SimulationStats`: `skill_distribution_over_time`, `skill_evolution_enabled`, `total_skill_updates`, `performance_samples`
+- ✅ **`src/simulation.rs`**:
+  - Implemented `generate_performance()`: generates performance index with base performance based on skill and lobby context, plus configurable noise
+  - Implemented `compute_expected_performance()`: computes expected performance (deterministic part) for skill updates
+  - Modified `process_match_completions()`: computes performance for each player, updates skills using formula \(s_i^+ = s_i^- + \alpha(\hat{y}_i - \mathbb{E}[Y_i])\), tracks performance samples
+  - Added batch update logic: calls `update_skill_percentiles()` every N matches (configurable batch size)
+  - Implemented `record_skill_distribution_snapshot()`: records time series of mean skill per bucket
+  - Added `matches_since_percentile_update` tracking field to `Simulation`
+- ✅ **`src/lib.rs`**:
+  - Added `get_skill_evolution_data()` WASM method
+  - Added `get_performance_distribution()` WASM method
+  - Added `toggle_skill_evolution()` WASM method
 
 **Frontend Work**:
-- Add chart: skill distribution evolution over time (animated or time slider)
-- Add toggle: "Static Skill" vs "Evolving Skill" mode
-- Show performance indices in match details (optional)
+- ✅ Added config controls: `skillLearningRate`, `performanceNoiseStd`, `enableSkillEvolution`, `skillUpdateBatchSize` sliders/checkbox
+- ✅ Added skill evolution metrics section in Overview tab (total updates, update rate, evolution mode)
+- ✅ Added comprehensive skill evolution visualizations in Distributions tab:
+  - Skill evolution over time (line chart showing key buckets: Low 1-2, Mid 5-6, High 9-10)
+  - Current skill distribution by bucket (bar chart)
+  - Performance distribution histogram
+  - Skill drift summary (avg change, most improved/declined buckets)
+- ✅ Added toggle button for static vs evolving skill mode
+- ✅ Updated stats parsing to include skill evolution metrics
 
 **Metrics & Experiments**:
-- Track: skill drift over time, performance distribution by skill bucket, skill update rate
-- Experiment: Compare blowout rates and search times with static vs evolving skill
+- ✅ Track: skill drift over time, performance distribution, skill update rate, total skill updates
+- ✅ Experiment ready: Compare blowout rates and search times with static vs evolving skill
 
-**Dependencies**: Slice C (team balancing) recommended for accurate performance context
+**Enhancements Beyond Original Plan**:
+- Added skill drift summary metrics showing overall skill change and most improved/declined buckets
+- Color-coded bucket visualization (red for low, green for high)
+- Real-time skill evolution tracking with automatic snapshot recording
+
+**Dependencies**: Slice C (team balancing) - completed, provides accurate performance context
 
 ---
 
@@ -521,24 +549,24 @@ Phases group slices into logical execution order. Each phase produces working ar
 
 ### Phase 2: Match Quality & Outcomes
 
-**Slices**: C (Team Balancing/Blowouts) ✅ **COMPLETE** + D (Performance/Skill Evolution)
+**Slices**: C (Team Balancing/Blowouts) ✅ **COMPLETE** + D (Performance/Skill Evolution) ✅ **COMPLETE**
 
 **Goal**: Improve match quality prediction and enable dynamic skill evolution.
 
 **Deliverables**:
 - ✅ Exact team balancing for small playlists
 - ✅ Enhanced blowout detection with severity
-- Performance model and skill update rule
-- Skill distribution evolution tracking
+- ✅ Performance model and skill update rule
+- ✅ Skill distribution evolution tracking
 
 **Validation**:
 - ✅ Compare blowout rates with exact vs heuristic balancing (ready for testing)
-- Verify skill evolution: players improve/decline based on performance
-- Track skill distribution stability over long runs
+- ✅ Verify skill evolution: players improve/decline based on performance (implemented and ready for testing)
+- ✅ Track skill distribution stability over long runs (tracking implemented)
 
-**Status**: Slice C complete. Slice D remaining.
+**Status**: Phase 2 complete. Both slices C and D implemented and ready for validation.
 
-**Estimated Effort**: 3-4 weeks (Slice C: ~1 week, Slice D: ~2-3 weeks)
+**Estimated Effort**: 3-4 weeks (Slice C: ~1 week, Slice D: ~2-3 weeks) - **COMPLETED**
 
 ---
 
@@ -699,9 +727,9 @@ This section documents canonical experiments that can be run once the relevant s
 
 ---
 
-### Experiment 5: Skill Evolution Over Time
+### Experiment 5: Skill Evolution Over Time ✅ **READY**
 
-**Dependencies**: Slices D, C
+**Dependencies**: Slices D ✅, C ✅
 
 **Parameters**: Compare "Static Skill" vs "Evolving Skill" modes over long runs (1000+ ticks)
 
@@ -710,6 +738,7 @@ This section documents canonical experiments that can be run once the relevant s
 - Blowout rate over time
 - Search time trends
 - Performance distribution by skill bucket
+- Skill drift metrics (avg change, most improved/declined buckets)
 
 **Expected Results**:
 - Evolving skill → skill distribution may shift (e.g., players improve)
@@ -717,6 +746,8 @@ This section documents canonical experiments that can be run once the relevant s
 - Static skill → stable but potentially unrealistic
 
 **Config Preset**: `experiments/skill_evolution_comparison.json`
+
+**Status**: All dependencies complete. Experiment can be run with full skill evolution tracking and visualizations.
 
 ---
 

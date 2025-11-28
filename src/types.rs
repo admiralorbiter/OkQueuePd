@@ -190,6 +190,9 @@ pub struct Player {
     pub recent_search_times: Vec<f64>,
     pub recent_blowouts: Vec<bool>,
     
+    /// Recent performance indices from matches (rolling window)
+    pub recent_performance: Vec<f64>,
+    
     /// Continuation probability (search again after match)
     pub continuation_prob: f64,
 }
@@ -224,6 +227,7 @@ impl Player {
             recent_delta_pings: Vec::new(),
             recent_search_times: Vec::new(),
             recent_blowouts: Vec::new(),
+            recent_performance: Vec::new(),
             continuation_prob: 0.85,
         }
     }
@@ -519,6 +523,8 @@ pub struct Match {
     pub win_probability_imbalance: f64,
     /// Blowout severity classification if blowout occurs
     pub blowout_severity: Option<BlowoutSeverity>,
+    /// Performance index per player (player_id -> performance)
+    pub player_performances: HashMap<usize, f64>,
 }
 
 /// Matchmaking configuration parameters
@@ -580,6 +586,15 @@ pub struct MatchmakingConfig {
     pub blowout_moderate_threshold: f64,
     /// Threshold for severe blowouts
     pub blowout_severe_threshold: f64,
+    
+    /// Skill learning rate (α in update rule: s_i^+ = s_i^- + α(ŷ_i - E[Y_i]))
+    pub skill_learning_rate: f64,
+    /// Performance noise standard deviation (σ for ε_i ~ N(0, σ²))
+    pub performance_noise_std: f64,
+    /// Enable skill evolution (false = static skill, true = evolving skill)
+    pub enable_skill_evolution: bool,
+    /// Update skill percentiles every N matches (batch size)
+    pub skill_update_batch_size: usize,
 }
 
 impl Default for MatchmakingConfig {
@@ -615,6 +630,10 @@ impl Default for MatchmakingConfig {
             blowout_mild_threshold: 0.15,
             blowout_moderate_threshold: 0.35,
             blowout_severe_threshold: 0.6,
+            skill_learning_rate: 0.01,
+            performance_noise_std: 0.15,
+            enable_skill_evolution: true,
+            skill_update_batch_size: 10,
         }
     }
 }
@@ -702,6 +721,16 @@ pub struct SimulationStats {
     pub solo_match_count: usize,
     pub party_search_times: Vec<f64>,
     pub solo_search_times: Vec<f64>,
+    
+    /// Skill evolution tracking
+    /// Time series of skill distribution: (tick, [(bucket_id, mean_skill), ...])
+    pub skill_distribution_over_time: Vec<(u64, Vec<(usize, f64)>)>,
+    /// Whether skill evolution is currently enabled
+    pub skill_evolution_enabled: bool,
+    /// Total number of skill updates applied
+    pub total_skill_updates: usize,
+    /// Distribution of performance indices
+    pub performance_samples: Vec<f64>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

@@ -33,6 +33,8 @@ pub struct Simulation {
     rng_seed: u64,
     /// Arrival rate (players per tick)
     arrival_rate: f64,
+    /// Number of matches since last percentile update
+    matches_since_percentile_update: usize,
 }
 
 impl Simulation {
@@ -52,6 +54,7 @@ impl Simulation {
             parties: HashMap::new(),
             rng_seed: seed,
             arrival_rate: 10.0,
+            matches_since_percentile_update: 0,
         }
     }
 
@@ -248,6 +251,78 @@ impl Simulation {
         let sum: f64 = (0..12).map(|_| rng.gen::<f64>()).sum();
         let normalized = (sum - 6.0) / 3.0; // Roughly N(0,1)
         normalized.clamp(-1.0, 1.0)
+    }
+
+    /// Generate performance index for a player in a match
+    /// Per whitepaper §3.7: Y_i = f_perf(s_i, s_lobby, m) + ε_i
+    fn generate_performance(
+        &self,
+        player: &Player,
+        lobby_avg_skill: f64,
+        _playlist: Playlist,
+        rng: &mut impl Rng,
+    ) -> f64 {
+        // Base performance: f_perf(s_i, s_lobby, m)
+        // Higher skill → higher base performance
+        // Performance relative to lobby average
+        let skill_advantage = player.skill - lobby_avg_skill;
+        
+        // Base performance increases with skill and advantage
+        // Normalize to 0-1 scale: 0.3 base + skill contribution + advantage
+        let base_perf = 0.3 + (player.skill + 1.0) / 2.0 * 0.4 + skill_advantage * 0.2;
+        
+        // Add noise: ε_i ~ N(0, σ²)
+        // Using uniform approximation for simplicity (range = ±3σ covers ~99.7%)
+        let noise_range = self.config.performance_noise_std * 3.0;
+        let noise = rng.gen_range(-noise_range..noise_range);
+        
+        // Clamp to [0, 1]
+        (base_perf + noise).clamp(0.0, 1.0)
+    }
+
+    /// Compute expected performance (deterministic part, no noise)
+    /// E[Y_i | s_i, lobby] = f_perf(s_i, s_lobby, m)
+    fn compute_expected_performance(
+        &self,
+        player: &Player,
+        lobby_avg_skill: f64,
+    ) -> f64 {
+        // E[Y_i | s_i, lobby] = deterministic part (no noise)
+        let skill_advantage = player.skill - lobby_avg_skill;
+        let base_perf = 0.3 + (player.skill + 1.0) / 2.0 * 0.4 + skill_advantage * 0.2;
+        base_perf.clamp(0.0, 1.0)
+    }
+
+    /// Record a snapshot of skill distribution over time
+    fn record_skill_distribution_snapshot(&mut self) {
+        if !self.config.enable_skill_evolution {
+            return;
+        }
+        
+        // Compute mean skill per bucket
+        let mut bucket_skills: HashMap<usize, Vec<f64>> = HashMap::new();
+        
+        for player in self.players.values() {
+            bucket_skills
+                .entry(player.skill_bucket)
+                .or_insert_with(Vec::new)
+                .push(player.skill);
+        }
+        
+        let snapshot: Vec<(usize, f64)> = bucket_skills
+            .iter()
+            .map(|(&bucket_id, skills)| {
+                let mean = skills.iter().sum::<f64>() / skills.len() as f64;
+                (bucket_id, mean)
+            })
+            .collect();
+        
+        self.stats.skill_distribution_over_time.push((self.current_time, snapshot));
+        
+        // Limit history to last 1000 snapshots to prevent unbounded growth
+        if self.stats.skill_distribution_over_time.len() > 1000 {
+            self.stats.skill_distribution_over_time.remove(0);
+        }
     }
 
     /// Update skill percentiles for all players
@@ -477,6 +552,7 @@ impl Simulation {
                 expected_score_differential,
                 win_probability_imbalance,
                 blowout_severity: None, // Will be assigned in determine_outcome()
+                player_performances: HashMap::new(),
             };
 
             // Check if match involves parties
@@ -568,6 +644,82 @@ impl Simulation {
                 // Track blowout severity
                 if let Some(severity) = blowout_severity {
                     *self.stats.blowout_severity_counts.entry(severity).or_insert(0) += 1;
+                }
+
+                // Compute performance indices and update skills
+                // 1. Compute lobby average skill
+                let all_player_ids: Vec<usize> = game_match.teams.iter().flatten().copied().collect();
+                let lobby_avg_skill = if !all_player_ids.is_empty() {
+                    all_player_ids.iter()
+                        .filter_map(|&pid| self.players.get(&pid).map(|p| p.skill))
+                        .sum::<f64>() / all_player_ids.len() as f64
+                } else {
+                    0.0
+                };
+
+                // 2. Generate performance for each player and update skills
+                for &player_id in &all_player_ids {
+                    // Get player immutably first to compute expected performance
+                    let expected_perf = if let Some(player) = self.players.get(&player_id) {
+                        if self.config.enable_skill_evolution {
+                            self.compute_expected_performance(player, lobby_avg_skill)
+                        } else {
+                            0.0
+                        }
+                    } else {
+                        continue;
+                    };
+                    
+                    // Generate performance index (need player reference again)
+                    let performance = if let Some(player) = self.players.get(&player_id) {
+                        self.generate_performance(
+                            player,
+                            lobby_avg_skill,
+                            game_match.playlist,
+                            rng,
+                        )
+                    } else {
+                        continue;
+                    };
+                    
+                    // Store in match
+                    game_match.player_performances.insert(player_id, performance);
+                    
+                    // Track performance sample
+                    self.stats.performance_samples.push(performance);
+                    if self.stats.performance_samples.len() > 1000 {
+                        self.stats.performance_samples.remove(0);
+                    }
+                    
+                    // Update skill if evolution is enabled
+                    if self.config.enable_skill_evolution {
+                        if let Some(player_mut) = self.players.get_mut(&player_id) {
+                            // Normalize observed performance (simple: use raw performance)
+                            let observed_perf = performance;
+                            
+                            // Skill update: s_i^+ = s_i^- + α(ŷ_i - E[Y_i])
+                            let skill_update = self.config.skill_learning_rate * (observed_perf - expected_perf);
+                            player_mut.skill = (player_mut.skill + skill_update).clamp(-1.0, 1.0);
+                            
+                            // Track performance in rolling window
+                            player_mut.recent_performance.push(performance);
+                            if player_mut.recent_performance.len() > 10 {
+                                player_mut.recent_performance.remove(0);
+                            }
+                            
+                            self.stats.total_skill_updates += 1;
+                        }
+                    }
+                }
+
+                // 3. Batch update percentiles if needed
+                if self.config.enable_skill_evolution {
+                    self.matches_since_percentile_update += 1;
+                    if self.matches_since_percentile_update >= self.config.skill_update_batch_size {
+                        self.update_skill_percentiles();
+                        self.record_skill_distribution_snapshot();
+                        self.matches_since_percentile_update = 0;
+                    }
                 }
 
                 // Update player stats and decide if they continue
@@ -753,6 +905,7 @@ impl Simulation {
     fn update_stats(&mut self) {
         self.stats.time_elapsed = self.current_time as f64 * self.config.tick_interval;
         self.stats.ticks = self.current_time;
+        self.stats.skill_evolution_enabled = self.config.enable_skill_evolution;
         
         // Count players by state
         self.stats.players_offline = 0;

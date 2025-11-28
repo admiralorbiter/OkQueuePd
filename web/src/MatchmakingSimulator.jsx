@@ -73,6 +73,10 @@ const defaultConfig = {
   blowoutMildThreshold: 0.15,
   blowoutModerateThreshold: 0.35,
   blowoutSevereThreshold: 0.6,
+  skillLearningRate: 0.01,
+  performanceNoiseStd: 0.15,
+  enableSkillEvolution: true,
+  skillUpdateBatchSize: 10,
 };
 
 // ============================================================================
@@ -108,6 +112,8 @@ export default function MatchmakingSimulator() {
   const [wasmReady, setWasmReady] = useState(false);
   const [wasmError, setWasmError] = useState(null);
   const [parties, setParties] = useState([]);
+  const [skillEvolutionData, setSkillEvolutionData] = useState([]);
+  const [performanceDistribution, setPerformanceDistribution] = useState([]);
   const animationRef = useRef(null);
 
   // Initialize WASM on mount
@@ -163,6 +169,10 @@ export default function MatchmakingSimulator() {
       blowout_mild_threshold: jsConfig.blowoutMildThreshold ?? 0.15,
       blowout_moderate_threshold: jsConfig.blowoutModerateThreshold ?? 0.35,
       blowout_severe_threshold: jsConfig.blowoutSevereThreshold ?? 0.6,
+      skill_learning_rate: jsConfig.skillLearningRate ?? 0.01,
+      performance_noise_std: jsConfig.performanceNoiseStd ?? 0.15,
+      enable_skill_evolution: jsConfig.enableSkillEvolution ?? true,
+      skill_update_batch_size: jsConfig.skillUpdateBatchSize ?? 10,
     };
   }, []);
 
@@ -220,10 +230,26 @@ export default function MatchmakingSimulator() {
         blowoutSeverityCounts: rawStats.blowout_severity_counts || {},
         perPlaylistBlowoutRate: rawStats.per_playlist_blowout_rate || {},
         teamSkillDifferenceSamples: rawStats.team_skill_difference_samples || [],
+        // Slice D: Skill evolution metrics
+        skillEvolutionEnabled: rawStats.skill_evolution_enabled || false,
+        totalSkillUpdates: rawStats.total_skill_updates || 0,
         // Time series data
         timeSeriesData: [],
       };
       console.log(`Simulation initialized. Total players: ${stats.totalPlayers}, Arrival rate: ${scaledArrivalRate}/tick`);
+      
+      // Fetch initial skill evolution data
+      try {
+        const evolutionJson = newSim.get_skill_evolution_data();
+        const evolutionData = JSON.parse(evolutionJson);
+        setSkillEvolutionData(evolutionData);
+        
+        const perfDistJson = newSim.get_performance_distribution(20);
+        const perfDist = JSON.parse(perfDistJson);
+        setPerformanceDistribution(perfDist);
+      } catch (e) {
+        console.error('Error fetching initial skill evolution data:', e);
+      }
       
       setSim(newSim);
       setStats(stats);
@@ -292,9 +318,27 @@ export default function MatchmakingSimulator() {
               blowoutSeverityCounts: rawStats.blowout_severity_counts || {},
               perPlaylistBlowoutRate: rawStats.per_playlist_blowout_rate || {},
               teamSkillDifferenceSamples: rawStats.team_skill_difference_samples || [],
+              // Slice D: Skill evolution metrics
+              skillEvolutionEnabled: rawStats.skill_evolution_enabled || false,
+              totalSkillUpdates: rawStats.total_skill_updates || 0,
               // Time series data (preserve from previous or initialize)
               timeSeriesData: prevStats?.timeSeriesData || [],
             };
+            
+            // Fetch skill evolution data and performance distribution
+            try {
+              if (sim) {
+                const evolutionJson = sim.get_skill_evolution_data();
+                const evolutionData = JSON.parse(evolutionJson);
+                setSkillEvolutionData(evolutionData);
+                
+                const perfDistJson = sim.get_performance_distribution(20);
+                const perfDist = JSON.parse(perfDistJson);
+                setPerformanceDistribution(perfDist);
+              }
+            } catch (e) {
+              console.error('Error fetching skill evolution data:', e);
+            }
             // Update time series
             if (newStats.timeSeriesData.length === 0 || newStats.timeSeriesData[newStats.timeSeriesData.length - 1].time !== newStats.timeElapsed) {
               newStats.timeSeriesData.push({
@@ -574,6 +618,34 @@ export default function MatchmakingSimulator() {
               >
                 ↻ RESET
               </button>
+              {config.enableSkillEvolution !== undefined && (
+                <button
+                  onClick={() => {
+                    if (sim && wasmReady) {
+                      try {
+                        const newValue = !config.enableSkillEvolution;
+                        updateConfig('enableSkillEvolution', newValue);
+                        sim.toggle_skill_evolution(newValue);
+                      } catch (error) {
+                        console.error('Error toggling skill evolution:', error);
+                      }
+                    }
+                  }}
+                  style={{ 
+                    flex: 1,
+                    padding: '0.6rem', 
+                    background: config.enableSkillEvolution ? COLORS.success : COLORS.darker, 
+                    border: `1px solid ${config.enableSkillEvolution ? COLORS.success : COLORS.border}`, 
+                    borderRadius: '6px', 
+                    color: COLORS.text, 
+                    cursor: 'pointer', 
+                    fontSize: '0.7rem',
+                    fontWeight: 600,
+                  }}
+                >
+                  {config.enableSkillEvolution ? '✓ EVOLVING' : '○ STATIC'}
+                </button>
+              )}
             </div>
             
             <label style={{ display: 'block', marginBottom: '0.5rem' }}>
@@ -667,6 +739,40 @@ export default function MatchmakingSimulator() {
                     step={(max - min) / 100}
                     value={config[key] ?? (min + max) / 2}
                     onChange={(e) => updateConfig(key, parseFloat(e.target.value))}
+                    style={{ width: '100%', accentColor: COLORS.tertiary }}
+                  />
+                </label>
+              ))}
+            </div>
+            <div style={{ marginTop: '1rem', paddingTop: '1rem', borderTop: `1px solid ${COLORS.border}` }}>
+              <h4 style={{ fontSize: '0.65rem', color: COLORS.textMuted, marginBottom: '0.5rem' }}>SKILL EVOLUTION</h4>
+              <label style={{ display: 'block', marginBottom: '0.5rem' }}>
+                <span style={{ fontSize: '0.65rem', color: COLORS.textMuted }}>
+                  <input
+                    type="checkbox"
+                    checked={config.enableSkillEvolution}
+                    onChange={(e) => updateConfig('enableSkillEvolution', e.target.checked)}
+                    style={{ marginRight: '0.5rem', accentColor: COLORS.tertiary }}
+                  />
+                  Enable Skill Evolution
+                </span>
+              </label>
+              {[
+                ['skillLearningRate', 'Skill Learning Rate (α)', 0.001, 0.1],
+                ['performanceNoiseStd', 'Performance Noise Std (σ)', 0.05, 0.5],
+                ['skillUpdateBatchSize', 'Skill Update Batch Size', 1, 50],
+              ].map(([key, label, min, max]) => (
+                <label key={key} style={{ display: 'block', marginBottom: '0.5rem' }}>
+                  <span style={{ fontSize: '0.65rem', color: COLORS.textMuted }}>
+                    {label}: {config[key]?.toFixed(key === 'skillUpdateBatchSize' ? 0 : 3) ?? (key === 'skillUpdateBatchSize' ? '10' : '0.01')}
+                  </span>
+                  <input
+                    type="range"
+                    min={min}
+                    max={max}
+                    step={key === 'skillUpdateBatchSize' ? 1 : (max - min) / 100}
+                    value={config[key] ?? (key === 'skillUpdateBatchSize' ? 10 : (min + max) / 2)}
+                    onChange={(e) => updateConfig(key, key === 'skillUpdateBatchSize' ? parseInt(e.target.value) : parseFloat(e.target.value))}
                     style={{ width: '100%', accentColor: COLORS.tertiary }}
                   />
                 </label>
@@ -820,6 +926,40 @@ export default function MatchmakingSimulator() {
                       )}
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* Skill Evolution Metrics Section */}
+              {config.enableSkillEvolution && stats && (
+                <div style={{ 
+                  background: COLORS.card, 
+                  border: `1px solid ${COLORS.border}`, 
+                  borderRadius: '8px', 
+                  padding: '1rem',
+                  marginBottom: '1rem',
+                }}>
+                  <h4 style={{ fontSize: '0.75rem', color: COLORS.textMuted, marginBottom: '0.75rem', letterSpacing: '0.1em' }}>
+                    SKILL EVOLUTION METRICS
+                    {stats.skillEvolutionEnabled && <span style={{ fontSize: '0.65rem', color: COLORS.success, marginLeft: '0.5rem' }}>(Active)</span>}
+                  </h4>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.75rem' }}>
+                    {[
+                      { label: 'Total Skill Updates', value: stats.totalSkillUpdates || 0, color: COLORS.primary },
+                      { label: 'Skill Update Rate', value: stats.totalMatches ? `${((stats.totalSkillUpdates || 0) / stats.totalMatches).toFixed(2)}` : '0.00', color: COLORS.tertiary, sub: 'updates per match' },
+                      { label: 'Evolution Mode', value: stats.skillEvolutionEnabled ? 'Evolving' : 'Static', color: stats.skillEvolutionEnabled ? COLORS.success : COLORS.textMuted },
+                    ].map(({ label, value, color, sub }) => (
+                      <div key={label} style={{
+                        background: COLORS.darker,
+                        border: `1px solid ${COLORS.border}`,
+                        borderRadius: '6px',
+                        padding: '0.75rem',
+                      }}>
+                        <div style={{ fontSize: '0.6rem', color: COLORS.textMuted, marginBottom: '0.25rem' }}>{label}</div>
+                        <div style={{ fontSize: '1.1rem', fontWeight: 600, color }}>{value}</div>
+                        {sub && <div style={{ fontSize: '0.55rem', color: COLORS.textMuted, marginTop: '0.25rem' }}>{sub}</div>}
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
 
@@ -1184,6 +1324,213 @@ export default function MatchmakingSimulator() {
                   </ResponsiveContainer>
                 </div>
               </div>
+
+              {/* Slice D: Skill Evolution Charts */}
+              {config.enableSkillEvolution && (
+                <div style={{ marginTop: '0.75rem' }}>
+                  <div style={{ background: COLORS.card, border: `1px solid ${COLORS.border}`, borderRadius: '8px', padding: '1rem', marginBottom: '0.75rem' }}>
+                    <h4 style={{ fontSize: '0.75rem', color: COLORS.textMuted, marginBottom: '0.5rem' }}>
+                      SKILL EVOLUTION OVER TIME (Mean Skill per Bucket)
+                      {stats?.skillEvolutionEnabled && <span style={{ fontSize: '0.65rem', color: COLORS.success, marginLeft: '0.5rem' }}>(Evolving)</span>}
+                    </h4>
+                    <ResponsiveContainer width="100%" height={400}>
+                      <LineChart data={(() => {
+                        if (!skillEvolutionData || skillEvolutionData.length === 0) return [];
+                        // Use actual snapshot data points
+                        const data = skillEvolutionData.map(snapshot => {
+                          const point = { tick: snapshot.tick, time: (snapshot.tick * (config.tickInterval || 5)).toFixed(0) };
+                          snapshot.buckets.forEach(bucket => {
+                            point[`B${bucket.bucket}`] = bucket.mean_skill;
+                          });
+                          return point;
+                        });
+                        return data;
+                      })()}>
+                        <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
+                        <XAxis 
+                          dataKey="tick" 
+                          tick={{ fill: COLORS.textMuted, fontSize: 9 }} 
+                          label={{ value: 'Simulation Tick', position: 'insideBottom', offset: -5, fill: COLORS.textMuted }}
+                          type="number"
+                          scale="linear"
+                        />
+                        <YAxis 
+                          tick={{ fill: COLORS.textMuted, fontSize: 10 }} 
+                          label={{ value: 'Mean Skill [-1 to 1]', angle: -90, position: 'insideLeft', fill: COLORS.textMuted }}
+                          domain={[-1, 1]}
+                        />
+                        <Tooltip 
+                          contentStyle={{ background: COLORS.card, border: `1px solid ${COLORS.border}` }}
+                          formatter={(value, name) => [value?.toFixed(3) || 'N/A', name]}
+                          labelFormatter={(label) => `Tick: ${label}`}
+                        />
+                        <Legend 
+                          wrapperStyle={{ fontSize: '0.65rem', color: COLORS.textMuted }}
+                          iconType="line"
+                        />
+                        {/* Show key buckets: Low (1-2), Mid (5-6), High (9-10) */}
+                        {[1, 2, 5, 6, 9, 10].map(bucketId => {
+                          const colors = [
+                            COLORS.danger,    // Bucket 1 (lowest)
+                            COLORS.warning,   // Bucket 2
+                            COLORS.tertiary,  // Bucket 5
+                            COLORS.primary,   // Bucket 6
+                            COLORS.success,   // Bucket 9
+                            COLORS.quaternary, // Bucket 10 (highest)
+                          ];
+                          return (
+                            <Line 
+                              key={bucketId} 
+                              type="monotone" 
+                              dataKey={`B${bucketId}`} 
+                              stroke={colors[bucketId <= 2 ? bucketId - 1 : bucketId <= 6 ? bucketId - 3 : bucketId - 7]} 
+                              strokeWidth={2}
+                              dot={false}
+                              name={`Bucket ${bucketId}${bucketId <= 2 ? ' (Low)' : bucketId >= 9 ? ' (High)' : ' (Mid)'}`}
+                              connectNulls
+                            />
+                          );
+                        })}
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                  
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+                    <div style={{ background: COLORS.card, border: `1px solid ${COLORS.border}`, borderRadius: '8px', padding: '1rem' }}>
+                      <h4 style={{ fontSize: '0.75rem', color: COLORS.textMuted, marginBottom: '0.5rem' }}>SKILL BY BUCKET (Current)</h4>
+                      <ResponsiveContainer width="100%" height={250}>
+                        <BarChart data={(() => {
+                          if (!skillEvolutionData || skillEvolutionData.length === 0) return [];
+                          const latest = skillEvolutionData[skillEvolutionData.length - 1];
+                          return latest.buckets.map(b => ({
+                            bucket: `B${b.bucket}`,
+                            skill: b.mean_skill,
+                            label: b.bucket <= 2 ? 'Low' : b.bucket >= 9 ? 'High' : 'Mid',
+                          })).sort((a, b) => parseInt(a.bucket.substring(1)) - parseInt(b.bucket.substring(1)));
+                        })()}>
+                          <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
+                          <XAxis dataKey="bucket" tick={{ fill: COLORS.textMuted, fontSize: 9 }} />
+                          <YAxis 
+                            tick={{ fill: COLORS.textMuted, fontSize: 10 }} 
+                            domain={[-1, 1]}
+                            label={{ value: 'Mean Skill', angle: -90, position: 'insideLeft', fill: COLORS.textMuted }}
+                          />
+                          <Tooltip 
+                            contentStyle={{ background: COLORS.card, border: `1px solid ${COLORS.border}` }}
+                            formatter={(value) => value?.toFixed(3) || 'N/A'}
+                          />
+                          <Bar dataKey="skill" radius={[2, 2, 0, 0]}>
+                            {(() => {
+                              if (!skillEvolutionData || skillEvolutionData.length === 0) return null;
+                              const latest = skillEvolutionData[skillEvolutionData.length - 1];
+                              return latest.buckets.map((b, idx) => {
+                                const bucketNum = b.bucket;
+                                const color = bucketNum <= 2 ? COLORS.danger : bucketNum >= 9 ? COLORS.success : COLORS.tertiary;
+                                return <Cell key={idx} fill={color} />;
+                              });
+                            })()}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+
+                    <div style={{ background: COLORS.card, border: `1px solid ${COLORS.border}`, borderRadius: '8px', padding: '1rem' }}>
+                      <h4 style={{ fontSize: '0.75rem', color: COLORS.textMuted, marginBottom: '0.5rem' }}>PERFORMANCE DISTRIBUTION</h4>
+                      <ResponsiveContainer width="100%" height={250}>
+                        <BarChart data={performanceDistribution}>
+                          <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
+                          <XAxis 
+                            dataKey="bin_start" 
+                            tick={{ fill: COLORS.textMuted, fontSize: 9 }} 
+                            label={{ value: 'Performance Index', position: 'insideBottom', offset: -5, fill: COLORS.textMuted }}
+                            tickFormatter={(v) => v.toFixed(2)}
+                          />
+                          <YAxis tick={{ fill: COLORS.textMuted, fontSize: 10 }} label={{ value: 'Count', angle: -90, position: 'insideLeft', fill: COLORS.textMuted }} />
+                          <Tooltip 
+                            contentStyle={{ background: COLORS.card, border: `1px solid ${COLORS.border}` }}
+                            formatter={(value, name, props) => [
+                              `${value} samples`,
+                              `Range: ${props.payload.bin_start.toFixed(2)} - ${props.payload.bin_end.toFixed(2)}`
+                            ]}
+                          />
+                          <Bar dataKey="count" fill={COLORS.tertiary} radius={[2, 2, 0, 0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+                  
+                  {/* Skill Drift Summary */}
+                  {skillEvolutionData && skillEvolutionData.length >= 2 && (
+                    <div style={{ 
+                      background: COLORS.card, 
+                      border: `1px solid ${COLORS.border}`, 
+                      borderRadius: '8px', 
+                      padding: '1rem',
+                      marginTop: '0.75rem',
+                    }}>
+                      <h4 style={{ fontSize: '0.75rem', color: COLORS.textMuted, marginBottom: '0.75rem' }}>SKILL DRIFT SUMMARY</h4>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.75rem' }}>
+                        {(() => {
+                          const first = skillEvolutionData[0];
+                          const last = skillEvolutionData[skillEvolutionData.length - 1];
+                          const firstMap = new Map(first.buckets.map(b => [b.bucket, b.mean_skill]));
+                          const lastMap = new Map(last.buckets.map(b => [b.bucket, b.mean_skill]));
+                          
+                          // Calculate average skill change
+                          let totalChange = 0;
+                          let count = 0;
+                          firstMap.forEach((firstSkill, bucket) => {
+                            const lastSkill = lastMap.get(bucket);
+                            if (lastSkill !== undefined) {
+                              totalChange += (lastSkill - firstSkill);
+                              count++;
+                            }
+                          });
+                          const avgChange = count > 0 ? totalChange / count : 0;
+                          
+                          // Find buckets with most change
+                          const changes = Array.from(firstMap.keys()).map(bucket => ({
+                            bucket,
+                            change: (lastMap.get(bucket) || 0) - (firstMap.get(bucket) || 0),
+                          })).sort((a, b) => Math.abs(b.change) - Math.abs(a.change));
+                          
+                          return [
+                            { 
+                              label: 'Avg Skill Change', 
+                              value: avgChange > 0 ? `+${avgChange.toFixed(4)}` : avgChange.toFixed(4), 
+                              color: avgChange > 0 ? COLORS.success : avgChange < 0 ? COLORS.danger : COLORS.textMuted,
+                              sub: 'Overall drift'
+                            },
+                            { 
+                              label: 'Most Improved', 
+                              value: `B${changes[0]?.bucket || 'N/A'}`, 
+                              color: COLORS.success,
+                              sub: changes[0] ? `+${changes[0].change.toFixed(3)}` : 'N/A'
+                            },
+                            { 
+                              label: 'Most Declined', 
+                              value: `B${changes[changes.length - 1]?.bucket || 'N/A'}`, 
+                              color: COLORS.danger,
+                              sub: changes[changes.length - 1] ? `${changes[changes.length - 1].change.toFixed(3)}` : 'N/A'
+                            },
+                          ].map(({ label, value, color, sub }) => (
+                            <div key={label} style={{
+                              background: COLORS.darker,
+                              border: `1px solid ${COLORS.border}`,
+                              borderRadius: '6px',
+                              padding: '0.75rem',
+                            }}>
+                              <div style={{ fontSize: '0.6rem', color: COLORS.textMuted, marginBottom: '0.25rem' }}>{label}</div>
+                              <div style={{ fontSize: '1.1rem', fontWeight: 600, color }}>{value}</div>
+                              {sub && <div style={{ fontSize: '0.55rem', color: COLORS.textMuted, marginTop: '0.25rem' }}>{sub}</div>}
+                            </div>
+                          ));
+                        })()}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 

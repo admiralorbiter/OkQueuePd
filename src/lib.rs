@@ -284,6 +284,59 @@ impl SimulationEngine {
             .collect();
         serde_json::to_string(&searches).unwrap_or_default()
     }
+
+    /// Get skill evolution data (time series of skill distribution)
+    pub fn get_skill_evolution_data(&self) -> String {
+        let evolution_data: Vec<_> = self.sim.stats.skill_distribution_over_time.iter()
+            .map(|(tick, buckets)| {
+                serde_json::json!({
+                    "tick": tick,
+                    "buckets": buckets.iter().map(|(bucket_id, mean_skill)| {
+                        serde_json::json!({
+                            "bucket": bucket_id,
+                            "mean_skill": mean_skill,
+                        })
+                    }).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        serde_json::to_string(&evolution_data).unwrap_or_default()
+    }
+
+    /// Get performance distribution histogram
+    pub fn get_performance_distribution(&self, num_bins: usize) -> String {
+        let samples = &self.sim.stats.performance_samples;
+        if samples.is_empty() {
+            return "[]".to_string();
+        }
+
+        let max_perf = samples.iter().cloned().fold(0.0_f64, f64::max);
+        let min_perf = samples.iter().cloned().fold(1.0_f64, f64::min);
+        let bin_width = ((max_perf - min_perf) / num_bins as f64).max(0.01);
+        
+        let mut bins = vec![0usize; num_bins];
+        for &sample in samples {
+            let bin = (((sample - min_perf) / bin_width) as usize).min(num_bins - 1);
+            bins[bin] += 1;
+        }
+
+        let histogram: Vec<_> = bins.iter().enumerate()
+            .map(|(i, &count)| {
+                serde_json::json!({
+                    "bin_start": min_perf + i as f64 * bin_width,
+                    "bin_end": min_perf + (i + 1) as f64 * bin_width,
+                    "count": count,
+                })
+            })
+            .collect();
+
+        serde_json::to_string(&histogram).unwrap_or_default()
+    }
+
+    /// Toggle skill evolution mode (static vs evolving)
+    pub fn toggle_skill_evolution(&mut self, enabled: bool) {
+        self.sim.config.enable_skill_evolution = enabled;
+    }
 }
 
 /// Run a parameter sweep experiment
