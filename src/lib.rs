@@ -278,7 +278,7 @@ impl SimulationEngine {
                     "size": s.size(),
                     "is_party": is_party,
                     "avg_skill_percentile": s.avg_skill_percentile,
-                    "wait_time": (self.sim.current_time - s.search_start_time) as f64 * self.sim.config.tick_interval,
+                    "wait_time": s.wait_time(self.sim.current_time, self.sim.config.tick_interval),
                 })
             })
             .collect();

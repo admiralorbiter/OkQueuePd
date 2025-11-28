@@ -73,6 +73,8 @@ impl Matchmaker {
         // 1. Check playlist compatibility
         for search in searches {
             if !search.acceptable_playlists.contains(&playlist) {
+                #[cfg(feature = "debug")]
+                eprintln!("Feasibility failed: playlist mismatch for search {} (playlist {:?})", search.id, playlist);
                 return None;
             }
         }
@@ -80,34 +82,50 @@ impl Matchmaker {
         // 2. Check total size
         let total_size: usize = searches.iter().map(|s| s.size()).sum();
         if total_size > playlist.required_players() {
+            #[cfg(feature = "debug")]
+            eprintln!("Feasibility failed: total size {} exceeds required {} for playlist {:?}", total_size, playlist.required_players(), playlist);
             return None;
         }
 
         // 3. Check skill similarity
-        let min_skill = searches.iter().map(|s| s.avg_skill_percentile).fold(f64::MAX, f64::min);
-        let max_skill = searches.iter().map(|s| s.avg_skill_percentile).fold(f64::MIN, f64::max);
-        let skill_range = max_skill - min_skill;
+        // Per whitepaper §3.3: [π_min(M), π_max(M)] ⊆ [ℓ_j(t), u_j(t)] for all j
+        let pi_min = searches.iter().map(|s| s.avg_skill_percentile).fold(f64::MAX, f64::min);
+        let pi_max = searches.iter().map(|s| s.avg_skill_percentile).fold(f64::MIN, f64::max);
         
         for search in searches {
-            let wait_time = search.wait_time(current_time);
-            let allowed_range = self.config.skill_similarity_backoff(wait_time);
+            let wait_time = search.wait_time(current_time, self.config.tick_interval);
+            let f_skill = self.config.skill_similarity_backoff(wait_time);
             
-            // Check if this search can accept the skill range
-            if skill_range > allowed_range * 2.0 {
+            // Compute acceptable range for this search: [ℓ_j(t), u_j(t)]
+            let ell_j = search.avg_skill_percentile - f_skill;
+            let u_j = search.avg_skill_percentile + f_skill;
+            
+            // Check: [π_min(M), π_max(M)] ⊆ [ℓ_j(t), u_j(t)]
+            // This means: π_min >= ℓ_j AND π_max <= u_j
+            if pi_min < ell_j || pi_max > u_j {
+                #[cfg(feature = "debug")]
+                eprintln!("Feasibility failed: skill similarity check failed for search {} (π_min={:.3}, π_max={:.3}, ℓ_j={:.3}, u_j={:.3})", 
+                    search.id, pi_min, pi_max, ell_j, u_j);
                 return None;
             }
         }
 
         // 4. Check skill disparity
+        // Per whitepaper §3.3: Δπ_M <= Δπ^max_j(t) for all j
+        let delta_pi_m = pi_max - pi_min;  // Lobby skill disparity
+        
         let max_disparity_allowed = searches
             .iter()
             .map(|s| {
-                let wait_time = s.wait_time(current_time);
+                let wait_time = s.wait_time(current_time, self.config.tick_interval);
                 self.config.skill_disparity_backoff(wait_time)
             })
             .fold(f64::MAX, f64::min);
         
-        if skill_range > max_disparity_allowed {
+        if delta_pi_m > max_disparity_allowed {
+            #[cfg(feature = "debug")]
+            eprintln!("Feasibility failed: skill disparity {} exceeds max allowed {} for searches {:?}", 
+                delta_pi_m, max_disparity_allowed, searches.iter().map(|s| s.id).collect::<Vec<_>>());
             return None;
         }
 
@@ -124,6 +142,9 @@ impl Matchmaker {
             .unwrap_or_default();
 
         if common_dcs.is_empty() {
+            #[cfg(feature = "debug")]
+            eprintln!("Feasibility failed: no common acceptable data centers for searches {:?}", 
+                searches.iter().map(|s| s.id).collect::<Vec<_>>());
             return None;
         }
 
@@ -134,10 +155,16 @@ impl Matchmaker {
                 .map(|dc| dc.available_servers(&playlist) > 0)
                 .unwrap_or(false)
         });
+        
+        if available_dc.is_none() {
+            #[cfg(feature = "debug")]
+            eprintln!("Feasibility failed: no available servers in common DCs {:?} for playlist {:?}", 
+                common_dcs, playlist);
+        }
 
         available_dc.map(|&dc_id| FeasibilityResult {
             data_center_id: dc_id,
-            skill_disparity: skill_range,
+            skill_disparity: delta_pi_m,
         })
     }
 
@@ -185,7 +212,7 @@ impl Matchmaker {
 
         // Wait time fairness (reward matching players who've waited longer)
         let avg_wait = searches.iter()
-            .map(|s| s.wait_time(current_time))
+            .map(|s| s.wait_time(current_time, self.config.tick_interval))
             .sum::<f64>() / searches.len() as f64;
         let wait_quality = (avg_wait / 60.0).min(1.0); // Bonus for reducing long waits
 
@@ -209,7 +236,7 @@ impl Matchmaker {
 
         // Update acceptable DCs for all searches based on current wait time
         for search in searches.iter_mut() {
-            let wait_time = search.wait_time(current_time);
+            let wait_time = search.wait_time(current_time, self.config.tick_interval);
             let mut acceptable = HashSet::new();
             
             for &player_id in &search.player_ids {
@@ -232,8 +259,8 @@ impl Matchmaker {
         // Sort searches by wait time (longest waiting = highest priority as seeds)
         let mut search_order: Vec<usize> = (0..searches.len()).collect();
         search_order.sort_by(|&a, &b| {
-            let wait_a = searches[a].wait_time(current_time);
-            let wait_b = searches[b].wait_time(current_time);
+            let wait_a = searches[a].wait_time(current_time, self.config.tick_interval);
+            let wait_b = searches[b].wait_time(current_time, self.config.tick_interval);
             wait_b.partial_cmp(&wait_a).unwrap()
         });
 
@@ -351,7 +378,7 @@ impl Matchmaker {
                         // Calculate search times
                         let search_times: Vec<f64> = lobby_searches
                             .iter()
-                            .map(|s| s.wait_time(current_time) * self.config.tick_interval)
+                            .map(|s| s.wait_time(current_time, self.config.tick_interval))
                             .collect();
 
                         // Create teams using skill-based balancing
@@ -469,6 +496,74 @@ impl Matchmaker {
         // No randomization needed since party integrity is maintained
 
         teams
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn test_skill_range_check_correct() {
+        let config = MatchmakingConfig::default();
+        let matchmaker = Matchmaker::new(config);
+        
+        // Create two searches with skill percentiles 0.4 and 0.6
+        let search1 = SearchObject {
+            id: 1,
+            player_ids: vec![1],
+            avg_skill_percentile: 0.4,
+            skill_disparity: 0.0,
+            avg_location: Location::new(0.0, 0.0),
+            platforms: HashMap::new(),
+            input_devices: HashMap::new(),
+            acceptable_playlists: {
+                let mut s = HashSet::new();
+                s.insert(Playlist::TeamDeathmatch);
+                s
+            },
+            search_start_time: 0,
+            acceptable_dcs: {
+                let mut s = HashSet::new();
+                s.insert(0);
+                s
+            },
+        };
+        
+        let search2 = SearchObject {
+            id: 2,
+            player_ids: vec![2],
+            avg_skill_percentile: 0.6,
+            skill_disparity: 0.0,
+            avg_location: Location::new(0.0, 0.0),
+            platforms: HashMap::new(),
+            input_devices: HashMap::new(),
+            acceptable_playlists: {
+                let mut s = HashSet::new();
+                s.insert(Playlist::TeamDeathmatch);
+                s
+            },
+            search_start_time: 0,
+            acceptable_dcs: {
+                let mut s = HashSet::new();
+                s.insert(0);
+                s
+            },
+        };
+        
+        let searches = vec![&search1, &search2];
+        let mut data_center = DataCenter::new(0, "Test", Location::new(0.0, 0.0), "Test");
+        data_center.busy_servers.insert(Playlist::TeamDeathmatch, 0);
+        let data_centers = vec![data_center];
+        
+        // With default config, skill_similarity_initial = 0.05
+        // Range is 0.6 - 0.4 = 0.2
+        // For search1 (0.4): [0.4 - 0.05, 0.4 + 0.05] = [0.35, 0.45]
+        // For search2 (0.6): [0.6 - 0.05, 0.6 + 0.05] = [0.55, 0.65]
+        // Match range [0.4, 0.6] is NOT contained in either range, so should fail
+        let result = matchmaker.check_feasibility(&searches, Playlist::TeamDeathmatch, 0, &data_centers);
+        assert!(result.is_none(), "Should fail skill similarity check");
     }
 }
 

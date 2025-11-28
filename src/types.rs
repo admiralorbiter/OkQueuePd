@@ -480,8 +480,8 @@ impl SearchObject {
         self.player_ids.len()
     }
     
-    pub fn wait_time(&self, current_time: u64) -> f64 {
-        (current_time - self.search_start_time) as f64
+    pub fn wait_time(&self, current_time: u64, tick_interval: f64) -> f64 {
+        ((current_time - self.search_start_time) as f64) * tick_interval
     }
 }
 
@@ -682,4 +682,67 @@ pub struct ExperimentConfig {
     pub runs_per_value: usize,
     /// Simulation duration per run (ticks)
     pub ticks_per_run: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_wait_time_converts_ticks_to_seconds() {
+        let search = SearchObject {
+            id: 1,
+            player_ids: vec![1],
+            avg_skill_percentile: 0.5,
+            skill_disparity: 0.0,
+            avg_location: Location::new(0.0, 0.0),
+            platforms: HashMap::new(),
+            input_devices: HashMap::new(),
+            acceptable_playlists: HashSet::new(),
+            search_start_time: 0,
+            acceptable_dcs: HashSet::new(),
+        };
+        
+        let tick_interval = 5.0;
+        let current_time = 10;
+        
+        // After 10 ticks with 5 second intervals, should be 50 seconds
+        let wait_time = search.wait_time(current_time, tick_interval);
+        assert_eq!(wait_time, 50.0);
+    }
+
+    #[test]
+    fn test_backoff_formulas() {
+        let config = MatchmakingConfig::default();
+        
+        // Test delta ping backoff: min(initial + rate * wait, max)
+        let wait_0 = config.delta_ping_backoff(0.0);
+        assert_eq!(wait_0, config.delta_ping_initial);
+        
+        let wait_10 = config.delta_ping_backoff(10.0);
+        let expected = (config.delta_ping_initial + config.delta_ping_rate * 10.0).min(config.delta_ping_max);
+        assert_eq!(wait_10, expected);
+        
+        // Test skill similarity backoff
+        let skill_wait_0 = config.skill_similarity_backoff(0.0);
+        assert_eq!(skill_wait_0, config.skill_similarity_initial);
+        
+        // Test skill disparity backoff
+        let disparity_wait_0 = config.skill_disparity_backoff(0.0);
+        assert_eq!(disparity_wait_0, config.max_skill_disparity_initial);
+    }
+
+    #[test]
+    fn test_backoff_with_seconds() {
+        let config = MatchmakingConfig::default();
+        let tick_interval = 5.0;
+        
+        // Simulate 2 ticks = 10 seconds
+        let wait_seconds = 2.0 * tick_interval;
+        let backoff = config.delta_ping_backoff(wait_seconds);
+        
+        // Should use seconds, not ticks
+        let expected = (config.delta_ping_initial + config.delta_ping_rate * wait_seconds).min(config.delta_ping_max);
+        assert_eq!(backoff, expected);
+    }
 }

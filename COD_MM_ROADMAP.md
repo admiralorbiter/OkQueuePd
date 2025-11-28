@@ -14,9 +14,11 @@ This roadmap guides the implementation of a full agent-based matchmaking simulat
   - WASM frontend integration complete
   - Party metrics and visualizations added
   - Automatic party generation via config parameter
-
-**In Progress**:
-- ⏳ **Slice B: Matchmaking Constraints & Backoff Refinement**
+- ✅ **Slice B: Matchmaking Constraints & Backoff Refinement**
+  - Fixed critical units mismatch bug (ticks → seconds)
+  - Fixed skill range check to match whitepaper §3.3 exactly
+  - Added optional debug logging behind feature flag
+  - All backoff formulas verified correct
 
 **Remaining Slices**: C, D, E, F, G, H (optional)
 
@@ -64,7 +66,7 @@ The React frontend (`web/src/`) provides:
 | **Skill System** | §2.4 | Raw skill, percentile, buckets | ⚠️ Static (no evolution) |
 | **Search Objects** | §2.7 | `SearchObject` struct | ✅ Complete (supports solo and parties) |
 | **Distance Metric** | §3.1 | `calculate_distance()` with weights | ✅ Complete |
-| **Feasibility Checks** | §3.3 | `check_feasibility()` implements 6 constraints | ⚠️ Units/time conversion needs review |
+| **Feasibility Checks** | §3.3 | `check_feasibility()` implements 6 constraints | ✅ Complete (units fixed, skill range check corrected) |
 | **Quality Score** | §3.4 | `calculate_quality()` with 3 components | ✅ Complete |
 | **Team Balancing** | §3.6 | `balance_teams()` snake draft | ⚠️ Heuristic (not Karmarkar-Karp) |
 | **Match Outcomes** | §3.7 | `determine_outcome()` logistic function | ⚠️ No performance model/KPM |
@@ -136,37 +138,55 @@ Each vertical slice is a self-contained feature that touches engine, metrics, an
 
 ### Slice B: Matchmaking Constraints & Backoff Refinement
 
-**Whitepaper References**: §2.3 (DC backoff), §2.7 (skill backoff), §3.3 (feasibility), §6.8 (under-full lobbies)
+**Whitepaper References**: §2.3 (DC backoff), §2.7 (skill backoff), §3.3 (feasibility)
+
+**Status**: ✅ **COMPLETE**
+
+**Critical Issues Fixed**:
+1. ✅ **Units Mismatch (BUG FIXED)**: `SearchObject::wait_time()` now returns seconds by accepting `tick_interval` parameter. All 8 call sites updated.
+2. ✅ **Skill Range Check (BUG FIXED)**: Replaced incorrect implementation with correct whitepaper §3.3 formula: \([\pi_{\min}(M), \pi_{\max}(M)] \subseteq [\ell_j(t), u_j(t)]\) for all searches j.
+3. ✅ **Backoff Formulas**: Verified correct - formulas match whitepaper exactly.
 
 **Goals**:
-- Ensure backoff functions match whitepaper formulas exactly
-- Fix units (seconds vs ticks) consistently
-- Add optional under-full lobby support
-- Add debug logging for feasibility failures
+- ✅ Fix units mismatch (ticks → seconds) in `wait_time()` and all backoff calls
+- ✅ Fix skill range check to match whitepaper §3.3 exactly
+- ✅ Add debug logging for feasibility failures (optional, behind feature flag)
+- **Defer**: Under-full lobby support (optional, per whitepaper §6.8 - only needed for extremely sparse populations)
 
 **Engine Work**:
-- **`src/types.rs`**:
-  - Review `MatchmakingConfig` backoff methods: ensure `delta_ping_backoff()`, `skill_similarity_backoff()`, `skill_disparity_backoff()` match formulas:
+- ✅ **`src/types.rs`**:
+  - ✅ Backoff methods already match whitepaper formulas (no changes needed):
     - \(f_{\text{conn}}(w) = \min(\delta_{\text{init}} + \delta_{\text{rate}} \cdot w, \delta_{\text{max}})\)
     - \(f_{\text{skill}}(w) = \min(\sigma_{\text{init}} + \sigma_{\text{rate}} \cdot w, \sigma_{\text{max}})\)
-  - Add config: `allow_underfull_lobbies: bool`, `underfull_threshold: f64` (e.g., 0.9 = 90% full)
-  - Add config: `underfull_min_wait_seconds: f64` (only allow under-full after this wait)
-- **`src/matchmaker.rs`**:
-  - Fix `SearchObject::wait_time()`: ensure it returns **seconds** (multiply ticks by `tick_interval`)
-  - Update all backoff calls to use seconds consistently
-  - In `check_feasibility()`: add exact skill range check \([\ell_j(t), u_j(t)]\) per whitepaper §3.3
-  - Add optional under-full lobby logic: if `allow_underfull_lobbies` and wait > threshold, allow matches at ≥ `underfull_threshold * required_players`
-  - Add debug logging (behind feature flag `#[cfg(feature = "debug")]`) that records why feasibility checks fail
-- **`src/simulation.rs`**:
-  - Ensure `tick_interval` is used consistently when converting between ticks and seconds
+  - ✅ Fixed `SearchObject::wait_time()`: now returns **seconds** by multiplying ticks by `tick_interval` parameter
+- ✅ **`src/matchmaker.rs`**:
+  - ✅ Updated all 8 `wait_time()` call sites to pass `tick_interval` parameter
+  - ✅ Fixed `check_feasibility()` skill similarity check:
+    - For each search j, compute \(\ell_j(t) = \bar{\pi}_j - f_{\text{skill}}(w_j)\) and \(u_j(t) = \bar{\pi}_j + f_{\text{skill}}(w_j)\)
+    - Verify \([\pi_{\min}(M), \pi_{\max}(M)] \subseteq [\ell_j(t), u_j(t)]\) for all j
+    - Replaced incorrect `skill_range > allowed_range * 2.0` check
+  - ✅ Added debug logging (behind `#[cfg(feature = "debug")]`) that records why feasibility checks fail
+  - ✅ Fixed skill disparity check to use correct variable name
+- ✅ **`src/simulation.rs`**:
+  - ✅ Verified `tick_interval` is accessible where `wait_time()` is called
+  - ✅ Audited all tick ↔ seconds conversions for consistency (all correct)
+- ✅ **`src/lib.rs`**:
+  - ✅ Updated WASM binding to use new `wait_time()` signature
+- ✅ **`Cargo.toml`**:
+  - ✅ Added optional `debug` feature flag
 
 **Frontend Work**:
-- Add config sliders for under-full lobby parameters
-- Show feasibility failure reasons in debug mode (optional)
+- ⚠️ Debug panel deferred (debug logging available in console when feature enabled)
 
 **Metrics & Experiments**:
-- Validate: backoff curves match expected formulas (plot curves)
-- Experiment: Compare search times with/without under-full lobbies in low-population scenarios
+- ✅ Added unit tests: `test_wait_time_converts_ticks_to_seconds`, `test_backoff_formulas`, `test_backoff_with_seconds`, `test_skill_range_check_correct`
+- ✅ Validated: backoff curves match expected formulas when wait_time is in seconds
+- ✅ Validated: skill range constraints work correctly with fixed implementation
+
+**Optional/Future Work** (defer to later slice if needed):
+- Under-full lobby support: Add config `allow_underfull_lobbies: bool`, `underfull_threshold: f64`, `underfull_min_wait_seconds: f64`
+- Frontend config sliders for under-full lobby parameters
+- Frontend debug panel to display feasibility failure reasons
 
 **Dependencies**: None (can be parallel with Slice A)
 
@@ -453,24 +473,25 @@ Phases group slices into logical execution order. Each phase produces working ar
 
 ### Phase 1: Core Matchmaking Fidelity
 
-**Slices**: A (Parties) ✅ **COMPLETE** + B (Constraints/Backoff) ⏳ **IN PROGRESS**
+**Slices**: A (Parties) ✅ **COMPLETE** + B (Constraints/Backoff) ✅ **COMPLETE**
 
 **Goal**: Complete the core matchmaking loop with parties and accurate constraints.
 
 **Deliverables**:
 - ✅ Parties fully integrated into search and matchmaking
-- ⏳ Backoff functions match whitepaper formulas exactly (needs verification)
-- ⏳ Under-full lobby support (optional)
-- ⏳ Debug logging for feasibility failures
+- ✅ Backoff functions match whitepaper formulas exactly (verified with unit tests)
+- ⚠️ Under-full lobby support (optional, deferred)
+- ✅ Debug logging for feasibility failures (behind feature flag)
 
 **Validation**:
 - ✅ Run simulation with parties and verify: party integrity maintained, search times reasonable
-- ⏳ Verify backoff curves match expected formulas
-- ⏳ Compare search times with/without under-full lobbies in low-population scenarios
+- ✅ Verify backoff curves match expected formulas (unit tests added)
+- ✅ Verify skill range constraints work correctly (unit tests added)
+- ⚠️ Compare search times with/without under-full lobbies in low-population scenarios (deferred)
 
-**Status**: Slice A complete. Slice B pending.
+**Status**: Phase 1 complete. Both slices A and B implemented and tested.
 
-**Estimated Effort**: 2-3 weeks (Slice A: ~1 week completed)
+**Estimated Effort**: 2-3 weeks (Slice A: ~1 week, Slice B: ~1 week)
 
 ---
 

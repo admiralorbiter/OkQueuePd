@@ -245,4 +245,96 @@ When adding new features to the simulation, ensure full integration:
 
 ---
 
-**Contributors**: Implementation notes from Slice A (Parties) completion
+**Contributors**: Implementation notes from Slice A (Parties) and Slice B (Constraints/Backoff) completion
+
+---
+
+## Slice B Implementation Notes
+
+### Breaking Changes: Method Signature Updates
+
+**Pattern**: When fixing critical bugs that require method signature changes, update all call sites systematically.
+
+**Example**: `SearchObject::wait_time()` signature changed from:
+```rust
+pub fn wait_time(&self, current_time: u64) -> f64
+```
+to:
+```rust
+pub fn wait_time(&self, current_time: u64, tick_interval: f64) -> f64
+```
+
+**Checklist for Breaking Changes**:
+- [ ] Update method signature
+- [ ] Find all call sites using `grep` or IDE search
+- [ ] Update each call site to pass new parameter
+- [ ] Verify compilation with `cargo check`
+- [ ] Run unit tests to verify behavior
+- [ ] Update WASM bindings if method is exposed
+
+**Impact**: This affected 8 call sites across `src/matchmaker.rs` and `src/lib.rs`.
+
+### Units Consistency Pattern
+
+**Critical**: Always verify units when working with time-based calculations.
+
+**Pattern**: When a method accepts or returns time values:
+1. Document the unit (ticks, seconds, milliseconds) in comments
+2. Use consistent naming (e.g., `wait_time_seconds`, `duration_ticks`)
+3. Convert at boundaries (e.g., when calling backoff functions that expect seconds)
+
+**Example from Slice B**:
+- `SearchObject::wait_time()` now returns seconds (was returning ticks - bug)
+- Backoff methods expect seconds
+- `tick_interval` parameter ensures correct conversion
+
+**Apply To**:
+- Any time-based calculations
+- Backoff functions
+- Search time tracking
+- Match duration calculations
+
+### Skill Range Check Formula
+
+**Pattern**: When implementing mathematical formulas from whitepaper, verify the exact formula matches.
+
+**Slice B Fix**: The skill similarity check was incorrectly implemented as:
+```rust
+if skill_range > allowed_range * 2.0 { return None; }
+```
+
+**Correct formula** (per whitepaper §3.3):
+```rust
+// For each search j: [π_min(M), π_max(M)] ⊆ [ℓ_j(t), u_j(t)]
+let ell_j = search.avg_skill_percentile - f_skill;
+let u_j = search.avg_skill_percentile + f_skill;
+if pi_min < ell_j || pi_max > u_j { return None; }
+```
+
+**Why**: The original check didn't verify that the match's skill range is contained within each search's acceptable range. The correct check ensures all searches can accept the full match range.
+
+### Debug Feature Flag Pattern
+
+**Pattern**: Use Rust feature flags for optional debug functionality:
+
+```rust
+#[cfg(feature = "debug")]
+eprintln!("Debug message: {}", details);
+```
+
+**Benefits**:
+- Zero runtime cost when disabled
+- Can be enabled during development/testing
+- Doesn't bloat production builds
+
+**Usage**: Enable with `cargo build --features debug` or add to `Cargo.toml`:
+```toml
+[features]
+default = []
+debug = []
+```
+
+**Apply To**:
+- Debug logging
+- Verbose diagnostics
+- Development-only features
