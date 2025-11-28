@@ -4,6 +4,22 @@
 
 This roadmap guides the implementation of a full agent-based matchmaking simulation that matches the mathematical model described in `cod_matchmaking_model.md`. The current codebase already implements a substantial portion of the whitepaper (approximately Stage 1-2), and this document breaks down the remaining work into **vertical slices** that can be implemented incrementally.
 
+**📝 Important**: See `NOTES.md` for implementation learnings, common mistakes, and gotchas discovered during development.
+
+### Progress Summary
+
+**Completed Slices**:
+- ✅ **Slice A: Parties & Multi-Player Search Objects**
+  - Full party system integrated into matchmaking
+  - WASM frontend integration complete
+  - Party metrics and visualizations added
+  - Automatic party generation via config parameter
+
+**In Progress**:
+- ⏳ **Slice B: Matchmaking Constraints & Backoff Refinement**
+
+**Remaining Slices**: C, D, E, F, G, H (optional)
+
 ### Relationship to Whitepaper
 
 The whitepaper (`cod_matchmaking_model.md`) describes:
@@ -33,6 +49,8 @@ The React frontend (`web/src/`) provides:
 - ✅ Real-time visualization (charts, histograms, bucket stats)
 - ✅ Parameter sweeps and experiments
 - ✅ Configuration controls
+- ✅ Full WASM integration (Rust simulation engine running in browser)
+- ✅ Party metrics and visualizations
 
 ---
 
@@ -44,7 +62,7 @@ The React frontend (`web/src/`) provides:
 | **Player Attributes** | §2.2 | `Player` struct (location, platform, input, skill, playlists) | ✅ Complete |
 | **DC & Ping Model** | §2.3 | `DataCenter`, `dc_pings`, `acceptable_dcs()` with backoff | ✅ Complete |
 | **Skill System** | §2.4 | Raw skill, percentile, buckets | ⚠️ Static (no evolution) |
-| **Search Objects** | §2.7 | `SearchObject` struct | ⚠️ Solo-only (no parties) |
+| **Search Objects** | §2.7 | `SearchObject` struct | ✅ Complete (supports solo and parties) |
 | **Distance Metric** | §3.1 | `calculate_distance()` with weights | ✅ Complete |
 | **Feasibility Checks** | §3.3 | `check_feasibility()` implements 6 constraints | ⚠️ Units/time conversion needs review |
 | **Quality Score** | §3.4 | `calculate_quality()` with 3 components | ✅ Complete |
@@ -52,7 +70,7 @@ The React frontend (`web/src/`) provides:
 | **Match Outcomes** | §3.7 | `determine_outcome()` logistic function | ⚠️ No performance model/KPM |
 | **Skill Evolution** | §3.7 | None | ❌ Missing |
 | **Retention Model** | §3.8 | Inline continuation probability | ⚠️ Ad-hoc (not formal logistic) |
-| **Parties** | §2.4, §2.7 | `Party` struct exists but unused | ❌ Not integrated |
+| **Parties** | §2.4, §2.7 | `Party` struct with full integration | ✅ Complete |
 | **Region Graph** | §2.3, §6.1 | Regions as strings, no adjacency | ⚠️ Implicit (needs explicit) |
 | **Under-full Lobbies** | §6.8 | Exact size match only | ⚠️ Missing |
 | **Aggregate Model** | §5 | None | ❌ Optional Phase |
@@ -65,39 +83,54 @@ The React frontend (`web/src/`) provides:
 
 Each vertical slice is a self-contained feature that touches engine, metrics, and optionally frontend. Slices can be implemented independently, but some have dependencies (noted below).
 
-### Slice A: Parties & Multi-Player Search Objects
+### Slice A: Parties & Multi-Player Search Objects ✅ **COMPLETE**
 
 **Whitepaper References**: §2.4 (party aggregates), §2.7 (search objects), §3.6 (team balancing with parties)
 
+**Status**: ✅ **Completed**
+
 **Goals**:
-- Enable players to form parties and search together
-- Build `SearchObject`s from parties (not just solo players)
-- Maintain party integrity during matchmaking (no splitting parties across teams)
-- Compute party-level skill aggregates (\(\bar{s}_P\), \(\Delta s_P\), \(\bar{\pi}_P\), \(\Delta\pi_P\))
+- ✅ Enable players to form parties and search together
+- ✅ Build `SearchObject`s from parties (not just solo players)
+- ✅ Maintain party integrity during matchmaking (no splitting parties across teams)
+- ✅ Compute party-level skill aggregates (\(\bar{s}_P\), \(\Delta s_P\), \(\bar{\pi}_P\), \(\Delta\pi_P\))
 
 **Engine Work**:
-- **`src/types.rs`**:
-  - Extend `Party` struct: add `preferred_playlists: HashSet<Playlist>`, `platforms: HashMap<Platform, usize>`, `input_devices: HashMap<InputDevice, usize>`, `avg_location: Location`
-  - Add methods: `Party::from_players(players: &[&Player]) -> Party`, `Party::update_aggregates()`
-- **`src/simulation.rs`**:
-  - Add `parties: HashMap<usize, Party>` to `Simulation`
-  - Implement `create_party(player_ids: Vec<usize>) -> usize` (random or rule-based)
-  - Implement `join_party(party_id: usize, player_id: usize)`, `leave_party(party_id: usize, player_id: usize)`, `disband_party(party_id: usize)`
-  - Modify `start_search()`: if player has `party_id`, create `SearchObject` from party; otherwise solo
-  - Update `SearchObject` creation to compute aggregates from party members
-- **`src/matchmaker.rs`**:
-  - Ensure `balance_teams()` respects party boundaries (no splitting parties)
-  - Update team balancing to use party-aggregated skills when assigning teams
+- ✅ **`src/types.rs`**:
+  - Extended `Party` struct: added `preferred_playlists: HashSet<Playlist>`, `platforms: HashMap<Platform, usize>`, `input_devices: HashMap<InputDevice, usize>`, `avg_location: Location`, `avg_skill_percentile`, `skill_percentile_disparity`
+  - Added methods: `Party::from_players(players: &[&Player]) -> Party`, `Party::update_aggregates()`, `Party::to_search_object()`
+- ✅ **`src/simulation.rs`**:
+  - Added `parties: HashMap<usize, Party>` to `Simulation`
+  - Implemented `create_party(player_ids: Vec<usize>) -> Result<usize, String>`
+  - Implemented `join_party(party_id: usize, player_id: usize)`, `leave_party(party_id: usize, player_id: usize)`, `disband_party(party_id: usize)`
+  - Modified `start_search()`: if player has `party_id`, create `SearchObject` from party; otherwise solo
+  - Updated `SearchObject` creation to compute aggregates from party members
+  - Added automatic party generation in `generate_population()` based on `party_player_fraction` config
+- ✅ **`src/matchmaker.rs`**:
+  - Updated `balance_teams()` to respect party boundaries (no splitting parties)
+  - Team balancing uses party-aggregated skills when assigning teams
+- ✅ **`src/lib.rs`**:
+  - Exposed party management methods via WASM bindings
+  - Added `get_parties()`, `get_party_members()`, `get_lobby_players()` for UI integration
 
 **Frontend Work**:
-- Add UI controls to create/join/leave parties (optional, can defer to later)
-- Update visualization to show party sizes in search queue (optional)
+- ✅ Full WASM integration replacing JavaScript simulation engine
+- ✅ Party metrics displayed in Overview tab (party count, avg size, match rates, search times)
+- ✅ Search queue visualization showing solo vs party searches
+- ✅ Party size distribution and party vs solo search time comparison charts
+- ✅ Config parameter: `party_player_fraction` (0.0-1.0) to control automatic party generation
+- ✅ Removed manual party creation UI in favor of automatic generation based on config
 
 **Metrics & Experiments**:
-- Track: average party size, party match rate vs solo match rate, skill disparity within parties
-- Experiment: Compare search times for solo vs party players
+- ✅ Track: average party size, party match rate vs solo match rate, skill disparity within parties
+- ✅ Party search times vs solo search times tracked and displayed
+- ✅ Party size distribution visualization
 
-**Dependencies**: None (can be first slice)
+**Enhancements Beyond Original Plan**:
+- Added `party_player_fraction` config parameter (default 0.5) to automatically generate parties during population creation
+- This allows controlled solo vs party mix without manual intervention, aligning with whitepaper's "50% parties of size 2-4" experiment scenario
+
+**Dependencies**: None (was first slice)
 
 ---
 
@@ -420,21 +453,24 @@ Phases group slices into logical execution order. Each phase produces working ar
 
 ### Phase 1: Core Matchmaking Fidelity
 
-**Slices**: A (Parties) + B (Constraints/Backoff)
+**Slices**: A (Parties) ✅ **COMPLETE** + B (Constraints/Backoff) ⏳ **IN PROGRESS**
 
 **Goal**: Complete the core matchmaking loop with parties and accurate constraints.
 
 **Deliverables**:
-- Parties fully integrated into search and matchmaking
-- Backoff functions match whitepaper formulas exactly
-- Under-full lobby support (optional)
-- Debug logging for feasibility failures
+- ✅ Parties fully integrated into search and matchmaking
+- ⏳ Backoff functions match whitepaper formulas exactly (needs verification)
+- ⏳ Under-full lobby support (optional)
+- ⏳ Debug logging for feasibility failures
 
 **Validation**:
-- Run simulation with parties and verify: party integrity maintained, search times reasonable, backoff curves match expected formulas
-- Compare search times with/without under-full lobbies in low-population scenarios
+- ✅ Run simulation with parties and verify: party integrity maintained, search times reasonable
+- ⏳ Verify backoff curves match expected formulas
+- ⏳ Compare search times with/without under-full lobbies in low-population scenarios
 
-**Estimated Effort**: 2-3 weeks
+**Status**: Slice A complete. Slice B pending.
+
+**Estimated Effort**: 2-3 weeks (Slice A: ~1 week completed)
 
 ---
 
@@ -674,6 +710,5 @@ This section documents canonical experiments that can be run once the relevant s
 
 ---
 
-**Last Updated**: 2024-12-19  
 **Version**: 1.0
 
