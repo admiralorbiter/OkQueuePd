@@ -278,6 +278,8 @@ The roadmap documents 6 canonical experiments ready to run:
 - **[Model Variables Reference](docs/MODEL_VARIABLES.md)**: Complete parameter documentation with defaults, effects, and tuning guidelines
 - **[Whitepaper](docs/cod_matchmaking_model.md)**: Full mathematical model specification
 - **[Implementation Roadmap](docs/COD_MM_ROADMAP.md)**: Detailed plan for completing the whitepaper implementation in vertical slices
+- **[Interpreting Results](docs/INTERPRETING_RESULTS.md)**: Guide to understanding and interpreting simulation metrics and experiment results
+- **[Glossary](docs/GLOSSARY.md)**: Definitions of technical terms used throughout the documentation
 
 ### Model Overview
 
