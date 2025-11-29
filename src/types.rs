@@ -27,6 +27,40 @@ impl Location {
     }
 }
 
+/// Geographic regions for matchmaking
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Region {
+    NorthAmerica,
+    Europe,
+    AsiaPacific,
+    SouthAmerica,
+    Other,
+}
+
+impl Region {
+    /// Get adjacent regions based on geographic connectivity
+    /// Defines the region adjacency graph:
+    /// - NA ↔ EU (transatlantic)
+    /// - NA ↔ SA (Americas)
+    /// - EU ↔ APAC (via Middle East/Asia)
+    /// - APAC ↔ SA (Pacific connection)
+    /// - Other is adjacent to all (catch-all)
+    pub fn adjacent_regions(&self) -> Vec<Region> {
+        match self {
+            Region::NorthAmerica => vec![Region::Europe, Region::SouthAmerica],
+            Region::Europe => vec![Region::NorthAmerica, Region::AsiaPacific],
+            Region::AsiaPacific => vec![Region::Europe, Region::SouthAmerica],
+            Region::SouthAmerica => vec![Region::NorthAmerica, Region::AsiaPacific],
+            Region::Other => vec![
+                Region::NorthAmerica,
+                Region::Europe,
+                Region::AsiaPacific,
+                Region::SouthAmerica,
+            ],
+        }
+    }
+}
+
 /// Platform types
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Platform {
@@ -97,7 +131,7 @@ pub struct DataCenter {
     pub id: usize,
     pub name: String,
     pub location: Location,
-    pub region: String,
+    pub region: Region,
     /// Server capacity per playlist
     pub server_capacity: HashMap<Playlist, usize>,
     /// Currently busy servers per playlist
@@ -105,7 +139,7 @@ pub struct DataCenter {
 }
 
 impl DataCenter {
-    pub fn new(id: usize, name: &str, location: Location, region: &str) -> Self {
+    pub fn new(id: usize, name: &str, location: Location, region: Region) -> Self {
         let mut server_capacity = HashMap::new();
         let mut busy_servers = HashMap::new();
         
@@ -129,7 +163,7 @@ impl DataCenter {
             id,
             name: name.to_string(),
             location,
-            region: region.to_string(),
+            region,
             server_capacity,
             busy_servers,
         }
@@ -147,6 +181,7 @@ impl DataCenter {
 pub struct Player {
     pub id: usize,
     pub location: Location,
+    pub region: Region,
     pub platform: Platform,
     pub input_device: InputDevice,
     pub voice_chat_enabled: bool,
@@ -221,6 +256,7 @@ impl Player {
         Self {
             id,
             location,
+            region: Region::Other, // Will be assigned based on location in generate_population()
             platform: Platform::PC,
             input_device: InputDevice::Controller,
             voice_chat_enabled: true,
@@ -253,14 +289,60 @@ impl Player {
         }
     }
 
-    /// Calculate acceptable data centers based on wait time
-    pub fn acceptable_dcs(&self, wait_time: f64, config: &MatchmakingConfig) -> Vec<usize> {
-        let delta_ping_allowed = config.delta_ping_backoff(wait_time);
+    /// Calculate acceptable data centers based on wait time with region-aware backoff
+    /// Implements three-tier backoff:
+    /// - Short wait (0-10s): Only best region DCs
+    /// - Medium wait (10-30s): Best region + adjacent regions
+    /// - Long wait (30s+): All regions
+    pub fn acceptable_dcs(
+        &self,
+        wait_time: f64,
+        config: &MatchmakingConfig,
+        player_region: Region,
+        data_centers: &[DataCenter],
+    ) -> Vec<usize> {
+        // Get region-specific delta ping backoff
+        let delta_ping_allowed = config.region_delta_ping_backoff(player_region, wait_time);
+        let max_ping = config.get_region_max_ping(player_region);
         
+        // Determine which regions are acceptable based on wait time
+        let acceptable_regions: Vec<Region> = if wait_time < 10.0 {
+            // Short wait: only best region
+            vec![player_region]
+        } else if wait_time < 30.0 {
+            // Medium wait: best region + adjacent regions
+            let mut regions = vec![player_region];
+            regions.extend(player_region.adjacent_regions());
+            regions
+        } else {
+            // Long wait: all regions
+            vec![
+                Region::NorthAmerica,
+                Region::Europe,
+                Region::AsiaPacific,
+                Region::SouthAmerica,
+                Region::Other,
+            ]
+        };
+        
+        // Create a set of acceptable region IDs for fast lookup
+        let acceptable_region_set: HashSet<Region> = acceptable_regions.into_iter().collect();
+        
+        // Filter DCs by ping constraints and region membership
         self.dc_pings
             .iter()
-            .filter(|(_, &ping)| {
-                ping <= self.best_ping + delta_ping_allowed && ping <= config.max_ping
+            .filter(|(&dc_id, &ping)| {
+                // Check ping constraints
+                let ping_ok = ping <= self.best_ping + delta_ping_allowed && ping <= max_ping;
+                
+                // Check region membership
+                let region_ok = data_centers
+                    .iter()
+                    .find(|dc| dc.id == dc_id)
+                    .map(|dc| acceptable_region_set.contains(&dc.region))
+                    .unwrap_or(false);
+                
+                ping_ok && region_ok
             })
             .map(|(&dc_id, _)| dc_id)
             .collect()
@@ -440,6 +522,7 @@ impl Party {
         search_start_time: u64,
         players: &HashMap<usize, Player>,
         config: &MatchmakingConfig,
+        data_centers: &[DataCenter],
     ) -> SearchObject {
         let party_players: Vec<&Player> = self.player_ids
             .iter()
@@ -452,7 +535,7 @@ impl Party {
         
         for player in &party_players {
             let player_dcs: HashSet<usize> = player
-                .acceptable_dcs(wait_time, config)
+                .acceptable_dcs(wait_time, config, player.region, data_centers)
                 .into_iter()
                 .collect();
             
@@ -532,6 +615,34 @@ pub struct ExperienceVector {
     pub won: bool,
     /// Performance index from match (0-1 scale)
     pub performance: f64,
+}
+
+/// Per-region configuration overrides
+/// Optional per-region settings that fall back to global config if not set
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RegionConfig {
+    /// Override global max_ping
+    pub max_ping: Option<f64>,
+    /// Override initial delta ping tolerance
+    pub delta_ping_initial: Option<f64>,
+    /// Override delta ping backoff rate
+    pub delta_ping_rate: Option<f64>,
+    /// Override skill similarity initial
+    pub skill_similarity_initial: Option<f64>,
+    /// Override skill similarity rate
+    pub skill_similarity_rate: Option<f64>,
+}
+
+/// Regional statistics for analysis
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RegionStats {
+    pub player_count: usize,
+    pub avg_search_time: f64,
+    pub avg_delta_ping: f64,
+    pub blowout_rate: f64,
+    pub active_matches: usize,
+    /// Fraction of matches involving multiple regions
+    pub cross_region_match_rate: f64,
 }
 
 /// Retention model configuration
@@ -653,6 +764,9 @@ pub struct MatchmakingConfig {
     /// Update skill percentiles every N matches (batch size)
     pub skill_update_batch_size: usize,
     
+    /// Per-region configuration overrides (optional)
+    pub region_configs: HashMap<Region, RegionConfig>,
+    
     /// Retention model configuration
     pub retention_config: RetentionConfig,
 }
@@ -694,6 +808,7 @@ impl Default for MatchmakingConfig {
             performance_noise_std: 0.15,
             enable_skill_evolution: true,
             skill_update_batch_size: 10,
+            region_configs: HashMap::new(),
             retention_config: RetentionConfig {
                 theta_ping: -0.02,
                 theta_search_time: -0.015,
@@ -724,6 +839,60 @@ impl MatchmakingConfig {
     pub fn skill_disparity_backoff(&self, wait_time: f64) -> f64 {
         (self.max_skill_disparity_initial + self.max_skill_disparity_rate * wait_time)
             .min(self.max_skill_disparity_max)
+    }
+
+    /// Get region-specific max ping (fallback to global if not set)
+    pub fn get_region_max_ping(&self, region: Region) -> f64 {
+        self.region_configs
+            .get(&region)
+            .and_then(|rc| rc.max_ping)
+            .unwrap_or(self.max_ping)
+    }
+
+    /// Get region-specific delta ping initial (fallback to global if not set)
+    pub fn get_region_delta_ping_initial(&self, region: Region) -> f64 {
+        self.region_configs
+            .get(&region)
+            .and_then(|rc| rc.delta_ping_initial)
+            .unwrap_or(self.delta_ping_initial)
+    }
+
+    /// Get region-specific delta ping rate (fallback to global if not set)
+    pub fn get_region_delta_ping_rate(&self, region: Region) -> f64 {
+        self.region_configs
+            .get(&region)
+            .and_then(|rc| rc.delta_ping_rate)
+            .unwrap_or(self.delta_ping_rate)
+    }
+
+    /// Get region-specific skill similarity initial (fallback to global if not set)
+    pub fn get_region_skill_similarity_initial(&self, region: Region) -> f64 {
+        self.region_configs
+            .get(&region)
+            .and_then(|rc| rc.skill_similarity_initial)
+            .unwrap_or(self.skill_similarity_initial)
+    }
+
+    /// Get region-specific skill similarity rate (fallback to global if not set)
+    pub fn get_region_skill_similarity_rate(&self, region: Region) -> f64 {
+        self.region_configs
+            .get(&region)
+            .and_then(|rc| rc.skill_similarity_rate)
+            .unwrap_or(self.skill_similarity_rate)
+    }
+
+    /// Calculate region-specific delta ping backoff
+    pub fn region_delta_ping_backoff(&self, region: Region, wait_time: f64) -> f64 {
+        let initial = self.get_region_delta_ping_initial(region);
+        let rate = self.get_region_delta_ping_rate(region);
+        (initial + rate * wait_time).min(self.delta_ping_max)
+    }
+
+    /// Calculate region-specific skill similarity backoff
+    pub fn region_skill_similarity_backoff(&self, region: Region, wait_time: f64) -> f64 {
+        let initial = self.get_region_skill_similarity_initial(region);
+        let rate = self.get_region_skill_similarity_rate(region);
+        (initial + rate * wait_time).min(self.skill_similarity_max)
     }
 }
 
@@ -845,6 +1014,11 @@ pub struct SimulationStats {
     pub population_history: Vec<(u64, usize)>, // (tick, effective_population)
     /// Diagnostic: recent population values for debugging
     pub recent_population_samples: Vec<usize>, // Last 10 effective population values
+    
+    /// Regional statistics
+    pub region_stats: HashMap<Region, RegionStats>,
+    /// Track if each match was cross-region (for calculating cross-region match rate)
+    pub cross_region_match_samples: Vec<bool>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

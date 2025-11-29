@@ -69,6 +69,7 @@ impl Matchmaker {
         playlist: Playlist,
         current_time: u64,
         data_centers: &[DataCenter],
+        players: &HashMap<usize, Player>,
     ) -> Option<FeasibilityResult> {
         // 1. Check playlist compatibility
         for search in searches {
@@ -148,8 +149,48 @@ impl Matchmaker {
             return None;
         }
 
-        // 6. Check server capacity - find a DC with available server
-        let available_dc = common_dcs.iter().find(|&&dc_id| {
+        // 6. Check server capacity - find a DC with available server, prioritizing by region
+        // Determine primary region (most common region among players in searches)
+        let mut region_counts: HashMap<Region, usize> = HashMap::new();
+        for search in searches {
+            for &player_id in &search.player_ids {
+                if let Some(player) = players.get(&player_id) {
+                    *region_counts.entry(player.region).or_insert(0) += 1;
+                }
+            }
+        }
+        
+        let primary_region = region_counts
+            .iter()
+            .max_by_key(|(_, &count)| count)
+            .map(|(region, _)| *region)
+            .unwrap_or(Region::Other);
+        
+        let adjacent_regions: HashSet<Region> = primary_region.adjacent_regions().into_iter().collect();
+        
+        // Prioritize DCs: best region → adjacent regions → other regions
+        let mut prioritized_dcs: Vec<usize> = Vec::new();
+        let mut adjacent_dcs: Vec<usize> = Vec::new();
+        let mut other_dcs: Vec<usize> = Vec::new();
+        
+        for &dc_id in &common_dcs {
+            if let Some(dc) = data_centers.iter().find(|dc| dc.id == dc_id) {
+                if dc.region == primary_region {
+                    prioritized_dcs.push(dc_id);
+                } else if adjacent_regions.contains(&dc.region) {
+                    adjacent_dcs.push(dc_id);
+                } else {
+                    other_dcs.push(dc_id);
+                }
+            }
+        }
+        
+        // Combine in priority order
+        prioritized_dcs.extend(adjacent_dcs);
+        prioritized_dcs.extend(other_dcs);
+        
+        // Find first available DC in priority order
+        let available_dc = prioritized_dcs.iter().find(|&&dc_id| {
             data_centers.iter()
                 .find(|dc| dc.id == dc_id)
                 .map(|dc| dc.available_servers(&playlist) > 0)
@@ -242,7 +283,7 @@ impl Matchmaker {
             for &player_id in &search.player_ids {
                 if let Some(player) = players.get(&player_id) {
                     let player_dcs: HashSet<_> = player
-                        .acceptable_dcs(wait_time, &self.config)
+                        .acceptable_dcs(wait_time, &self.config, player.region, data_centers)
                         .into_iter()
                         .collect();
                     
@@ -332,7 +373,7 @@ impl Matchmaker {
                         .chain(std::iter::once(candidate))
                         .collect();
 
-                    if self.check_feasibility(&lobby_searches, playlist, current_time, data_centers).is_some() {
+                    if self.check_feasibility(&lobby_searches, playlist, current_time, data_centers, players).is_some() {
                         lobby_indices.push(cand_idx);
                         lobby_size += candidate.size();
                     }
@@ -350,6 +391,7 @@ impl Matchmaker {
                         playlist,
                         current_time,
                         data_centers,
+                        players,
                     ) {
                         let quality = self.calculate_quality(
                             &lobby_searches,
@@ -381,6 +423,15 @@ impl Matchmaker {
                             .map(|s| s.wait_time(current_time, self.config.tick_interval))
                             .collect();
 
+                        // Detect cross-region match (players from multiple regions)
+                        let mut regions_in_match: HashSet<Region> = HashSet::new();
+                        for &player_id in &all_players {
+                            if let Some(player) = players.get(&player_id) {
+                                regions_in_match.insert(player.region);
+                            }
+                        }
+                        let is_cross_region = regions_in_match.len() > 1;
+
                         // Create teams using skill-based balancing
                         let teams = self.balance_teams(&all_players, players, parties, playlist, rng);
 
@@ -405,6 +456,7 @@ impl Matchmaker {
                             skill_disparity: feasibility.skill_disparity,
                             avg_delta_ping,
                             search_times,
+                            is_cross_region,
                         });
                     }
                 }
@@ -699,16 +751,27 @@ mod tests {
         };
         
         let searches = vec![&search1, &search2];
-        let mut data_center = DataCenter::new(0, "Test", Location::new(0.0, 0.0), "Test");
+        let mut data_center = DataCenter::new(0, "Test", Location::new(0.0, 0.0), Region::Other);
         data_center.busy_servers.insert(Playlist::TeamDeathmatch, 0);
         let data_centers = vec![data_center];
+        
+        // Create test players for the searches
+        let mut players = HashMap::new();
+        let mut player1 = Player::new(1, Location::new(0.0, 0.0), 0.0);
+        player1.region = Region::Other;
+        player1.skill_percentile = 0.4;
+        players.insert(1, player1);
+        let mut player2 = Player::new(2, Location::new(0.0, 0.0), 0.0);
+        player2.region = Region::Other;
+        player2.skill_percentile = 0.6;
+        players.insert(2, player2);
         
         // With default config, skill_similarity_initial = 0.05
         // Range is 0.6 - 0.4 = 0.2
         // For search1 (0.4): [0.4 - 0.05, 0.4 + 0.05] = [0.35, 0.45]
         // For search2 (0.6): [0.6 - 0.05, 0.6 + 0.05] = [0.55, 0.65]
         // Match range [0.4, 0.6] is NOT contained in either range, so should fail
-        let result = matchmaker.check_feasibility(&searches, Playlist::TeamDeathmatch, 0, &data_centers);
+        let result = matchmaker.check_feasibility(&searches, Playlist::TeamDeathmatch, 0, &data_centers, &players);
         assert!(result.is_none(), "Should fail skill similarity check");
     }
 }
@@ -729,6 +792,8 @@ pub struct MatchResult {
     pub skill_disparity: f64,
     pub avg_delta_ping: f64,
     pub search_times: Vec<f64>,
+    /// Whether this match involves players from multiple regions
+    pub is_cross_region: bool,
 }
 
 use serde::{Deserialize, Serialize};

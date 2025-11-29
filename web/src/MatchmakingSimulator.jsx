@@ -87,6 +87,8 @@ const defaultConfig = {
     baseContinueProb: 0.0,
     experienceWindowSize: 5,
   },
+  // Per-region configuration overrides (optional)
+  regionConfigs: {},
 };
 
 // ============================================================================
@@ -128,6 +130,9 @@ export default function MatchmakingSimulator() {
   const [sessionStats, setSessionStats] = useState(null);
   const [effectivePopulationHistory, setEffectivePopulationHistory] = useState([]);
   const [returnStats, setReturnStats] = useState(null);
+  const [regionStats, setRegionStats] = useState({});
+  const [selectedRegion, setSelectedRegion] = useState('All');
+  const [regionConfigExpanded, setRegionConfigExpanded] = useState(false);
   const animationRef = useRef(null);
 
   // Initialize WASM on mount
@@ -196,6 +201,40 @@ export default function MatchmakingSimulator() {
         base_continue_prob: jsConfig.retentionConfig?.baseContinueProb ?? 0.0,
         experience_window_size: jsConfig.retentionConfig?.experienceWindowSize ?? 5,
       },
+      region_configs: (() => {
+        // Convert JS region configs to Rust format
+        // Rust expects HashMap<Region, RegionConfig> where Region is an enum
+        // When serialized to JSON, Region enum becomes a string key
+        const regionConfigs = {};
+        if (jsConfig.regionConfigs) {
+          Object.entries(jsConfig.regionConfigs).forEach(([jsRegion, regionCfg]) => {
+            if (regionCfg && typeof regionCfg === 'object') {
+              const rustConfig = {};
+              // Only include fields that are set (not empty string)
+              if (regionCfg.maxPing !== undefined && regionCfg.maxPing !== '') {
+                rustConfig.max_ping = regionCfg.maxPing;
+              }
+              if (regionCfg.deltaPingInitial !== undefined && regionCfg.deltaPingInitial !== '') {
+                rustConfig.delta_ping_initial = regionCfg.deltaPingInitial;
+              }
+              if (regionCfg.deltaPingRate !== undefined && regionCfg.deltaPingRate !== '') {
+                rustConfig.delta_ping_rate = regionCfg.deltaPingRate;
+              }
+              if (regionCfg.skillSimilarityInitial !== undefined && regionCfg.skillSimilarityInitial !== '') {
+                rustConfig.skill_similarity_initial = regionCfg.skillSimilarityInitial;
+              }
+              if (regionCfg.skillSimilarityRate !== undefined && regionCfg.skillSimilarityRate !== '') {
+                rustConfig.skill_similarity_rate = regionCfg.skillSimilarityRate;
+              }
+              // Only add region config if it has at least one override
+              if (Object.keys(rustConfig).length > 0) {
+                regionConfigs[jsRegion] = rustConfig;
+              }
+            }
+          });
+        }
+        return regionConfigs;
+      })(),
     };
   }, []);
 
@@ -359,6 +398,9 @@ export default function MatchmakingSimulator() {
               activeSessions: rawStats.active_sessions || 0,
               totalSessionsCompleted: rawStats.total_sessions_completed || 0,
               populationChangeRate: prevStats?.populationChangeRate ?? 0,
+              // Slice F: Regional metrics
+              regionStats: rawStats.region_stats || {},
+              crossRegionMatchSamples: rawStats.cross_region_match_samples || [],
               // Time series data (preserve from previous or initialize)
               timeSeriesData: prevStats?.timeSeriesData || [],
             };
@@ -397,6 +439,11 @@ export default function MatchmakingSimulator() {
                 const populationHistoryJson = sim.get_effective_population_history();
                 const populationHistory = JSON.parse(populationHistoryJson);
                 setEffectivePopulationHistory(populationHistory);
+                
+                // Fetch region stats
+                const regionStatsJson = sim.get_region_stats();
+                const regionStats = JSON.parse(regionStatsJson);
+                setRegionStats(regionStats);
               }
             } catch (e) {
               console.error('Error fetching skill evolution data:', e);
@@ -472,9 +519,11 @@ export default function MatchmakingSimulator() {
   const updateConfig = (key, value) => {
     setConfig(prev => {
       let newConfig;
-      // Handle nested objects (e.g., retentionConfig)
+      // Handle nested objects (e.g., retentionConfig, regionConfigs)
       if (key === 'retentionConfig' && typeof value === 'object') {
         newConfig = { ...prev, retentionConfig: { ...prev.retentionConfig, ...value } };
+      } else if (key === 'regionConfigs' && typeof value === 'object') {
+        newConfig = { ...prev, regionConfigs: value };
       } else {
         // Handle simple key-value pairs
         newConfig = { ...prev, [key]: typeof value === 'number' ? value : parseFloat(value) };
@@ -923,6 +972,81 @@ export default function MatchmakingSimulator() {
                 );
               })}
             </div>
+            <div style={{ marginTop: '1rem', paddingTop: '1rem', borderTop: `1px solid ${COLORS.border}` }}>
+              <h4 style={{ fontSize: '0.65rem', color: COLORS.textMuted, marginBottom: '0.5rem', cursor: 'pointer' }}
+                  onClick={() => setRegionConfigExpanded(!regionConfigExpanded)}>
+                {regionConfigExpanded ? '▼' : '▶'} REGION CONFIG (Optional Overrides)
+              </h4>
+              {regionConfigExpanded && (
+                <div style={{ fontSize: '0.6rem', color: COLORS.textMuted, marginBottom: '0.5rem' }}>
+                  Per-region configuration overrides. Leave empty to use global values.
+                </div>
+              )}
+              {regionConfigExpanded && ['NorthAmerica', 'Europe', 'AsiaPacific', 'SouthAmerica'].map(region => (
+                <div key={region} style={{ marginBottom: '0.75rem', padding: '0.5rem', background: COLORS.darker, borderRadius: '4px' }}>
+                  <div style={{ fontSize: '0.65rem', color: COLORS.textMuted, marginBottom: '0.5rem', fontWeight: 600 }}>
+                    {region.replace(/([A-Z])/g, ' $1').trim()}
+                  </div>
+                  {[
+                    ['maxPing', 'Max Ping (ms)', 50, 300],
+                    ['deltaPingInitial', 'Delta Ping Initial (ms)', 0, 50],
+                    ['deltaPingRate', 'Delta Ping Rate (ms/s)', 0, 10],
+                    ['skillSimilarityInitial', 'Skill Similarity Initial', 0, 0.3],
+                    ['skillSimilarityRate', 'Skill Similarity Rate', 0, 0.1],
+                  ].map(([key, label, min, max]) => {
+                    const regionKey = `regionConfigs.${region}.${key}`;
+                    const currentValue = config.regionConfigs?.[region]?.[key] ?? '';
+                    return (
+                      <label key={key} style={{ display: 'block', marginBottom: '0.5rem' }}>
+                        <span style={{ fontSize: '0.6rem', color: COLORS.textMuted }}>
+                          {label}: {currentValue === '' ? 'default' : currentValue.toFixed(2)}
+                        </span>
+                        <div style={{ display: 'flex', gap: '0.25rem', alignItems: 'center' }}>
+                          <input
+                            type="range"
+                            min={min}
+                            max={max}
+                            step={(max - min) / 100}
+                            value={currentValue === '' ? (min + max) / 2 : currentValue}
+                            onChange={(e) => {
+                              const newValue = parseFloat(e.target.value);
+                              const newRegionConfigs = { ...(config.regionConfigs || {}) };
+                              if (!newRegionConfigs[region]) newRegionConfigs[region] = {};
+                              newRegionConfigs[region][key] = newValue;
+                              updateConfig('regionConfigs', newRegionConfigs);
+                            }}
+                            style={{ flex: 1, accentColor: COLORS.tertiary }}
+                          />
+                          <button
+                            onClick={() => {
+                              const newRegionConfigs = { ...(config.regionConfigs || {}) };
+                              if (newRegionConfigs[region]) {
+                                delete newRegionConfigs[region][key];
+                                if (Object.keys(newRegionConfigs[region]).length === 0) {
+                                  delete newRegionConfigs[region];
+                                }
+                              }
+                              updateConfig('regionConfigs', newRegionConfigs);
+                            }}
+                            style={{
+                              padding: '0.15rem 0.4rem',
+                              fontSize: '0.55rem',
+                              background: COLORS.card,
+                              border: `1px solid ${COLORS.border}`,
+                              color: COLORS.textMuted,
+                              cursor: 'pointer',
+                              borderRadius: '3px',
+                            }}
+                          >
+                            Clear
+                          </button>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
           </div>
 
           <div>
@@ -1236,6 +1360,30 @@ export default function MatchmakingSimulator() {
           {/* Distributions Tab */}
           {activeTab === 'distributions' && (
             <div>
+              {/* Region Filter */}
+              <div style={{ marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <label style={{ fontSize: '0.7rem', color: COLORS.textMuted }}>Filter by Region:</label>
+                <select
+                  value={selectedRegion}
+                  onChange={(e) => setSelectedRegion(e.target.value)}
+                  style={{
+                    background: COLORS.card,
+                    border: `1px solid ${COLORS.border}`,
+                    borderRadius: '4px',
+                    padding: '0.25rem 0.5rem',
+                    color: COLORS.text,
+                    fontSize: '0.7rem',
+                  }}
+                >
+                  <option value="All">All Regions</option>
+                  <option value="NorthAmerica">North America</option>
+                  <option value="Europe">Europe</option>
+                  <option value="AsiaPacific">Asia Pacific</option>
+                  <option value="SouthAmerica">South America</option>
+                  <option value="Other">Other</option>
+                </select>
+              </div>
+
               {/* Party Visualizations */}
               {parties.length > 0 && (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '0.75rem' }}>
@@ -1426,6 +1574,98 @@ export default function MatchmakingSimulator() {
                   </ResponsiveContainer>
                 </div>
               </div>
+
+              {/* Slice F: Regional Metrics Charts */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginTop: '0.75rem' }}>
+                <div style={{ background: COLORS.card, border: `1px solid ${COLORS.border}`, borderRadius: '8px', padding: '1rem' }}>
+                  <h4 style={{ fontSize: '0.75rem', color: COLORS.textMuted, marginBottom: '0.5rem' }}>SEARCH TIME BY REGION</h4>
+                  <ResponsiveContainer width="100%" height={250}>
+                    <BarChart data={(() => {
+                      if (!regionStats || Object.keys(regionStats).length === 0) return [];
+                      return Object.entries(regionStats).map(([region, stats]) => ({
+                        region: region.replace(/([A-Z])/g, ' $1').trim(),
+                        searchTime: stats.avg_search_time || 0,
+                      })).sort((a, b) => b.searchTime - a.searchTime);
+                    })()}>
+                      <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
+                      <XAxis dataKey="region" tick={{ fill: COLORS.textMuted, fontSize: 9 }} angle={-45} textAnchor="end" height={60} />
+                      <YAxis tick={{ fill: COLORS.textMuted, fontSize: 10 }} label={{ value: 'Avg Search Time (s)', angle: -90, position: 'insideLeft', fill: COLORS.textMuted }} />
+                      <Tooltip contentStyle={{ background: COLORS.card, border: `1px solid ${COLORS.border}` }} formatter={(v) => `${Number(v).toFixed(1)}s`} />
+                      <Bar dataKey="searchTime" fill={COLORS.tertiary} radius={[2, 2, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+
+                <div style={{ background: COLORS.card, border: `1px solid ${COLORS.border}`, borderRadius: '8px', padding: '1rem' }}>
+                  <h4 style={{ fontSize: '0.75rem', color: COLORS.textMuted, marginBottom: '0.5rem' }}>DELTA PING BY REGION</h4>
+                  <ResponsiveContainer width="100%" height={250}>
+                    <BarChart data={(() => {
+                      if (!regionStats || Object.keys(regionStats).length === 0) return [];
+                      return Object.entries(regionStats).map(([region, stats]) => ({
+                        region: region.replace(/([A-Z])/g, ' $1').trim(),
+                        deltaPing: stats.avg_delta_ping || 0,
+                      })).sort((a, b) => b.deltaPing - a.deltaPing);
+                    })()}>
+                      <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
+                      <XAxis dataKey="region" tick={{ fill: COLORS.textMuted, fontSize: 9 }} angle={-45} textAnchor="end" height={60} />
+                      <YAxis tick={{ fill: COLORS.textMuted, fontSize: 10 }} label={{ value: 'Avg Delta Ping (ms)', angle: -90, position: 'insideLeft', fill: COLORS.textMuted }} />
+                      <Tooltip contentStyle={{ background: COLORS.card, border: `1px solid ${COLORS.border}` }} formatter={(v) => `${Number(v).toFixed(1)}ms`} />
+                      <Bar dataKey="deltaPing" fill={COLORS.secondary} radius={[2, 2, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+
+                <div style={{ background: COLORS.card, border: `1px solid ${COLORS.border}`, borderRadius: '8px', padding: '1rem' }}>
+                  <h4 style={{ fontSize: '0.75rem', color: COLORS.textMuted, marginBottom: '0.5rem' }}>BLOWOUT RATE BY REGION</h4>
+                  <ResponsiveContainer width="100%" height={250}>
+                    <BarChart data={(() => {
+                      if (!regionStats || Object.keys(regionStats).length === 0) return [];
+                      return Object.entries(regionStats).map(([region, stats]) => ({
+                        region: region.replace(/([A-Z])/g, ' $1').trim(),
+                        blowoutRate: (stats.blowout_rate || 0) * 100,
+                      })).sort((a, b) => b.blowoutRate - a.blowoutRate);
+                    })()}>
+                      <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
+                      <XAxis dataKey="region" tick={{ fill: COLORS.textMuted, fontSize: 9 }} angle={-45} textAnchor="end" height={60} />
+                      <YAxis tick={{ fill: COLORS.textMuted, fontSize: 10 }} label={{ value: 'Blowout Rate (%)', angle: -90, position: 'insideLeft', fill: COLORS.textMuted }} />
+                      <Tooltip contentStyle={{ background: COLORS.card, border: `1px solid ${COLORS.border}` }} formatter={(v) => `${Number(v).toFixed(1)}%`} />
+                      <Bar dataKey="blowoutRate" fill={COLORS.danger} radius={[2, 2, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+
+                <div style={{ background: COLORS.card, border: `1px solid ${COLORS.border}`, borderRadius: '8px', padding: '1rem' }}>
+                  <h4 style={{ fontSize: '0.75rem', color: COLORS.textMuted, marginBottom: '0.5rem' }}>ACTIVE MATCHES BY REGION</h4>
+                  <ResponsiveContainer width="100%" height={250}>
+                    <BarChart data={(() => {
+                      if (!regionStats || Object.keys(regionStats).length === 0) return [];
+                      return Object.entries(regionStats).map(([region, stats]) => ({
+                        region: region.replace(/([A-Z])/g, ' $1').trim(),
+                        matches: stats.active_matches || 0,
+                      })).sort((a, b) => b.matches - a.matches);
+                    })()}>
+                      <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
+                      <XAxis dataKey="region" tick={{ fill: COLORS.textMuted, fontSize: 9 }} angle={-45} textAnchor="end" height={60} />
+                      <YAxis tick={{ fill: COLORS.textMuted, fontSize: 10 }} label={{ value: 'Active Matches', angle: -90, position: 'insideLeft', fill: COLORS.textMuted }} />
+                      <Tooltip contentStyle={{ background: COLORS.card, border: `1px solid ${COLORS.border}` }} />
+                      <Bar dataKey="matches" fill={COLORS.success} radius={[2, 2, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+
+              {/* Cross-Region Match Rate Metric */}
+              {stats && stats.crossRegionMatchSamples && stats.crossRegionMatchSamples.length > 0 && (
+                <div style={{ marginTop: '0.75rem', background: COLORS.card, border: `1px solid ${COLORS.border}`, borderRadius: '8px', padding: '1rem' }}>
+                  <h4 style={{ fontSize: '0.75rem', color: COLORS.textMuted, marginBottom: '0.5rem' }}>CROSS-REGION MATCH RATE</h4>
+                  <div style={{ fontSize: '2rem', fontWeight: 700, color: COLORS.primary }}>
+                    {((stats.crossRegionMatchSamples.filter(x => x).length / stats.crossRegionMatchSamples.length) * 100).toFixed(1)}%
+                  </div>
+                  <div style={{ fontSize: '0.65rem', color: COLORS.textMuted, marginTop: '0.25rem' }}>
+                    {stats.crossRegionMatchSamples.filter(x => x).length} of {stats.crossRegionMatchSamples.length} matches involve multiple regions
+                  </div>
+                </div>
+              )}
               
               {/* Slice E: Retention Model Charts */}
               <div style={{ marginTop: '0.75rem' }}>

@@ -34,8 +34,23 @@ This roadmap guides the implementation of a full agent-based matchmaking simulat
   - Frontend visualizations: skill evolution time series, current skill distribution, performance distribution
   - Toggle between static and evolving skill modes
   - Skill drift summary metrics
+- ✅ **Slice E: Satisfaction, Continuation, and Retention Modeling**
+  - Formal retention model with logistic function and experience vectors
+  - Return probability model (between-sessions)
+  - Effective population size and churn tracking
+  - Population change rate metric
+  - Retention presets (ping-first, skill-first, lenient, strict)
+  - Diagnostic panel for retention model debugging
+- ✅ **Slice F: Region/DC Graph & Regional Metrics**
+  - Explicit Region enum (NorthAmerica, Europe, AsiaPacific, SouthAmerica, Other)
+  - Region adjacency graph with realistic geographic connections
+  - Region-aware backoff (best region → adjacent → all based on wait time)
+  - Per-region configuration overrides (max ping, delta ping, skill similarity)
+  - Regional metrics tracking (search time, delta ping, blowout rate, cross-region match rate)
+  - Frontend region-split charts and region filter dropdown
+  - Per-region config UI panel
 
-**Remaining Slices**: E, F, G, H (optional)
+**Remaining Slices**: G, H (optional)
 
 ### Relationship to Whitepaper
 
@@ -67,6 +82,8 @@ The Rust/WASM engine (`src/`) already implements:
 - ✅ Population health tracking (effective population size, population change rate)
 - ✅ Per-bucket statistics
 - ✅ Blowout severity tracking and per-playlist metrics
+- ✅ Region adjacency graph and region-aware backoff
+- ✅ Regional metrics tracking (per-region search times, delta ping, blowout rates, cross-region match rate)
 
 The React frontend (`web/src/`) provides:
 - ✅ Real-time visualization (charts, histograms, bucket stats)
@@ -81,8 +98,9 @@ The React frontend (`web/src/`) provides:
 - ✅ Skill evolution toggle and configuration controls
 - ✅ Retention model diagnostic panel with computed probabilities and config values
 - ✅ Population change rate metric (tracks rate of change of effective population)
-- ✅ Retention model diagnostic panel with computed probabilities and config values
-- ✅ Population change rate metric (replaces "Players Leaving" rate for better population health tracking)
+- ✅ Region-split charts (search time, delta ping, blowout rate by region)
+- ✅ Region filter dropdown and per-region configuration UI
+- ✅ Cross-region match rate tracking and visualization
 
 ---
 
@@ -103,7 +121,7 @@ The React frontend (`web/src/`) provides:
 | **Skill Evolution** | §3.7 | Performance model and skill update rule implemented | ✅ Complete |
 | **Retention Model** | §3.8 | Formal logistic model with experience vectors, return probability | ✅ Complete |
 | **Parties** | §2.4, §2.7 | `Party` struct with full integration | ✅ Complete |
-| **Region Graph** | §2.3, §6.1 | Regions as strings, no adjacency | ⚠️ Implicit (needs explicit) |
+| **Region Graph** | §2.3, §6.1 | `Region` enum with adjacency graph, region-aware backoff | ✅ Complete |
 | **Under-full Lobbies** | §6.8 | Exact size match only | ⚠️ Missing |
 | **Aggregate Model** | §5 | None | ❌ Optional Phase |
 
@@ -403,42 +421,39 @@ Each vertical slice is a self-contained feature that touches engine, metrics, an
 
 ---
 
-### Slice F: Region/DC Graph & Regional Metrics
+### Slice F: Region/DC Graph & Regional Metrics ✅ **COMPLETE**
 
 **Whitepaper References**: §2.3 (DC connectivity), §2.6 (DCs), §4 (regions), §6.1 (regional behavior)
 
+**Status**: ✅ **Completed**
+
 **Goals**:
-- Make regions explicit (enum instead of strings)
-- Define region adjacency graph
-- Add region-aware backoff and tuning
-- Track region-split metrics
+- ✅ Make regions explicit (enum instead of strings)
+- ✅ Define region adjacency graph
+- ✅ Add region-aware backoff and tuning
+- ✅ Track region-split metrics
 
 **Engine Work**:
-- **`src/types.rs`**:
-  - Add enum `Region { NorthAmerica, Europe, AsiaPacific, SouthAmerica, Other }`
-  - Add to `DataCenter`: `region: Region` (replace `String`)
-  - Add to `Player`: `region: Region` (derived from location or explicit)
-  - Add struct `RegionConfig`:
+- ✅ **`src/types.rs`**:
+  - Added enum `Region { NorthAmerica, Europe, AsiaPacific, SouthAmerica, Other }` with `Serialize`, `Deserialize`, `Clone`, `Copy`, `Debug`, `PartialEq`, `Eq`, `Hash`
+  - Updated `DataCenter`: `region: Region` (replaced `String`)
+  - Updated `Player`: added `region: Region` field
+  - Added struct `RegionConfig` with optional overrides:
     ```rust
     pub struct RegionConfig {
-        pub max_ping: f64,
-        pub delta_ping_initial: f64,
-        pub delta_ping_rate: f64,
-        pub skill_similarity_initial: f64,
-        // ... other per-region overrides
+        pub max_ping: Option<f64>,
+        pub delta_ping_initial: Option<f64>,
+        pub delta_ping_rate: Option<f64>,
+        pub skill_similarity_initial: Option<f64>,
+        pub skill_similarity_rate: Option<f64>,
     }
     ```
-  - Add to `MatchmakingConfig`: `region_configs: HashMap<Region, RegionConfig>` (optional overrides)
-  - Add function `Region::adjacent_regions() -> Vec<Region>` (define adjacency graph)
-- **`src/simulation.rs`**:
-  - Update `init_default_data_centers()`: use `Region` enum
-  - Update `generate_population()`: assign `player.region` based on location
-  - In `Player::acceptable_dcs()`: use region-aware backoff (prefer best region, then adjacent regions as wait grows)
-- **`src/matchmaker.rs`**:
-  - When expanding acceptable DCs, prioritize: best region → adjacent regions → other regions
-- **`src/simulation.rs`**:
-  - Add to `SimulationStats`: `region_stats: HashMap<Region, RegionStats>`
-  - Add struct `RegionStats`:
+  - Added to `MatchmakingConfig`: `region_configs: HashMap<Region, RegionConfig>` with helper methods for region-specific config retrieval
+  - Implemented `Region::adjacent_regions() -> Vec<Region>` defining adjacency graph:
+    - NA ↔ EU (transatlantic), NA ↔ SA (Americas)
+    - EU ↔ APAC (via Middle East/Asia), APAC ↔ SA (Pacific)
+    - Other is adjacent to all (catch-all)
+  - Added struct `RegionStats`:
     ```rust
     pub struct RegionStats {
         pub player_count: usize,
@@ -446,19 +461,58 @@ Each vertical slice is a self-contained feature that touches engine, metrics, an
         pub avg_delta_ping: f64,
         pub blowout_rate: f64,
         pub active_matches: usize,
+        pub cross_region_match_rate: f64,
+        pub total_matches: usize,
+        pub blowout_count: usize,
+        pub cross_region_matches: usize,
     }
     ```
+  - Updated `SimulationStats`: added `region_stats: HashMap<Region, RegionStats>` and `cross_region_match_samples: Vec<bool>`
+  - Updated `Player::acceptable_dcs()`: implemented region-aware backoff with three-tier system:
+    1. Short wait (0-10s): Only best region DCs
+    2. Medium wait (10-30s): Best region + adjacent regions
+    3. Long wait (30s+): All regions
+- ✅ **`src/simulation.rs`**:
+  - Updated `init_default_data_centers()`: replaced string regions with `Region` enum variants
+  - Updated `generate_population()`: added `determine_region_from_location()` helper using geographic bounds to assign player regions
+  - Updated `start_search()`: modified to pass `player.region` and `data_centers` to `acceptable_dcs()`
+  - Updated `create_matches()`: added cross-region match detection and tracking
+  - Added `update_region_stats()` method: aggregates per-region metrics (search times, delta pings, blowout rates, cross-region match rates)
+  - Updated `update_stats()`: calls `update_region_stats()` to populate regional statistics
+- ✅ **`src/matchmaker.rs`**:
+  - Updated `check_feasibility()`: implemented region-aware DC prioritization (best region → adjacent → other)
+  - Updated `run_tick()`: added cross-region match detection by checking player regions
+  - Updated `MatchResult`: added `is_cross_region: bool` field
+- ✅ **`src/lib.rs`**:
+  - Added `get_region_stats() -> String` WASM method to expose regional statistics
+  - Updated `get_data_centers()`: ensured Region enum serializes correctly as string
 
 **Frontend Work**:
-- Add region filter dropdown
-- Add region-split charts (search time, delta ping, blowout rate by region)
-- Add DC map visualization (optional, show DCs with capacity/usage)
+- ✅ Added region filter dropdown with "All Regions" option
+- ✅ Added region-split charts:
+  - Search Time by Region (bar chart)
+  - Delta Ping by Region (bar chart)
+  - Blowout Rate by Region (bar chart)
+  - Cross-Region Match Rate (metric card)
+  - Active Matches by Region (bar chart)
+- ✅ Added region config UI panel (collapsible section in config panel):
+  - Per-region overrides for `maxPing`, `deltaPingInitial`, `deltaPingRate`, `skillSimilarityInitial`, `skillSimilarityRate`
+  - Handles nested configuration updates correctly
+- ✅ Updated stats parsing: handles `region_stats` JSON with Region enum string keys
+- ⚠️ DC map visualization deferred (optional enhancement)
 
 **Metrics & Experiments**:
-- Track: search times by region, cross-region match rate, delta ping by region
-- Experiment: Compare behavior in low-population vs high-population regions
+- ✅ Track: search times by region, cross-region match rate, delta ping by region, blowout rate by region
+- ✅ Track: active matches per region, player count per region
+- ✅ Experiment ready: Compare behavior in low-population vs high-population regions (Experiment 4 ready)
 
-**Dependencies**: Slice B (backoff refinement) recommended for region-aware backoff
+**Enhancements Beyond Original Plan**:
+- Added cross-region match rate tracking and visualization
+- Implemented flexible per-region config overrides with fallback to global values
+- Added geographic bounds-based region assignment from player location
+- Enhanced region stats with additional metrics (total matches, blowout count, cross-region matches)
+
+**Dependencies**: Slice B (backoff refinement) ✅ - completed, provides foundation for region-aware backoff
 
 ---
 
@@ -500,7 +554,7 @@ Each vertical slice is a self-contained feature that touches engine, metrics, an
 - All experiments from slices A-F should be runnable from UI
 - Document canonical experiments in `EXPERIMENTS.md` (see Slice H)
 
-**Dependencies**: Slices A-F (all metrics must be implemented first)
+**Dependencies**: Slices A-F ✅ (all metrics implemented, ready to proceed)
 
 ---
 
@@ -539,7 +593,7 @@ Each vertical slice is a self-contained feature that touches engine, metrics, an
 - Validate: aggregate model reproduces micro-model outputs (search times, delta ping, blowouts) within acceptable error
 - Experiment: Run long-term scenarios (months) with aggregate model
 
-**Dependencies**: Slices A-F (need complete micro-model first to fit parameters)
+**Dependencies**: Slices A-F ✅ (complete micro-model available for parameter fitting)
 
 ---
 
@@ -596,7 +650,7 @@ Phases group slices into logical execution order. Each phase produces working ar
 
 ### Phase 3: Player Behavior & Regional Analysis
 
-**Slices**: E (Retention) ✅ **COMPLETE** + F (Regions)
+**Slices**: E (Retention) ✅ **COMPLETE** + F (Regions) ✅ **COMPLETE**
 
 **Goal**: Model player satisfaction and enable regional analysis.
 
@@ -604,20 +658,22 @@ Phases group slices into logical execution order. Each phase produces working ar
 - ✅ Formal retention model with experience vector
 - ✅ Return probability model (between-sessions)
 - ✅ Effective population size and churn tracking
-- ⚠️ Region adjacency graph and region-aware backoff (Slice F - pending)
-- ⚠️ Per-region metrics and analysis (Slice F - pending)
+- ✅ Region adjacency graph and region-aware backoff
+- ✅ Per-region metrics and analysis
 - ✅ Retention presets (ping-first, skill-first, lenient, strict)
 - ✅ Population change rate metric (tracks rate of change of effective population)
 - ✅ Diagnostic panel for retention model debugging
+- ✅ Region-split charts and region filter controls
+- ✅ Per-region configuration overrides
 
 **Validation**:
 - ✅ Compare population health (concurrent players, population change rate) with different retention models (Experiment 3 ready)
-- ⚠️ Analyze regional differences: search times, delta ping, blowout rates (Slice F - pending)
-- ⚠️ Verify low-population regions can spill into adjacent regions (Slice F - pending)
+- ✅ Analyze regional differences: search times, delta ping, blowout rates (Slice F complete)
+- ✅ Verify low-population regions can spill into adjacent regions (region-aware backoff implemented)
 
-**Status**: Slice E complete with return probability and population health metrics. Slice F (Regions) remains.
+**Status**: Phase 3 complete. Both slices E and F implemented and ready for validation.
 
-**Estimated Effort**: 2-3 weeks (Slice E: ✅ Complete, Slice F: pending)
+**Estimated Effort**: 2-3 weeks (Slice E: ✅ Complete, Slice F: ✅ Complete)
 
 ---
 
@@ -741,24 +797,29 @@ This section documents canonical experiments that can be run once the relevant s
 
 ---
 
-### Experiment 4: Regional Population Effects
+### Experiment 4: Regional Population Effects ✅ **READY**
 
-**Dependencies**: Slices F, B
+**Dependencies**: Slices F ✅, B ✅
 
 **Parameters**: Vary regional population weights (e.g., NA: 0.7, EU: 0.2, APAC: 0.1 vs balanced 0.33 each)
 
 **Metrics to Track**:
-- Search time by region
-- Delta ping by region
-- Cross-region match rate
-- Blowout rate by region
+- ✅ Search time by region
+- ✅ Delta ping by region
+- ✅ Cross-region match rate
+- ✅ Blowout rate by region
+- ✅ Active matches by region
+- ✅ Player count by region
 
 **Expected Results**:
 - Low-population regions → longer search times, higher delta ping (spill to other regions)
 - High-population regions → shorter search times, better ping
 - Regional backoff helps but doesn't eliminate disparities
+- Region-aware backoff should show three-tier expansion (best → adjacent → all) as wait time increases
 
 **Config Preset**: `experiments/regional_population_effects.json`
+
+**Status**: All dependencies complete. Experiment can be run with full regional metrics tracking and region-aware backoff.
 
 ---
 

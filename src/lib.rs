@@ -182,7 +182,7 @@ impl SimulationEngine {
                 serde_json::json!({
                     "id": dc.id,
                     "name": dc.name,
-                    "region": dc.region,
+                    "region": dc.region, // Region enum will serialize as string
                     "lat": dc.location.lat,
                     "lon": dc.location.lon,
                     "busy_servers": dc.busy_servers,
@@ -190,6 +190,11 @@ impl SimulationEngine {
             })
             .collect();
         serde_json::to_string(&dc_info).unwrap_or_default()
+    }
+
+    /// Get regional statistics as JSON
+    pub fn get_region_stats(&self) -> String {
+        serde_json::to_string(&self.sim.stats.region_stats).unwrap_or_default()
     }
 
     /// Create a party from player IDs

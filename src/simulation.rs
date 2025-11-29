@@ -3,7 +3,7 @@ use crate::types::*;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Main simulation state and controller
 #[derive(Serialize, Deserialize)]
@@ -82,19 +82,54 @@ impl Simulation {
         }
     }
 
+    /// Determine region from geographic location
+    /// Uses geographic bounds:
+    /// - NA: lat 25-70, lon -130 to -50
+    /// - EU: lat 35-70, lon -10 to 40
+    /// - APAC: lat -50 to 50, lon 100 to 180 (or -180 to -120 for Pacific)
+    /// - SA: lat -60 to 15, lon -90 to -30
+    /// - Default to Other if outside bounds
+    fn region_from_location(location: Location) -> Region {
+        let lat = location.lat;
+        let lon = location.lon;
+        
+        // North America: lat 25-70, lon -130 to -50
+        if lat >= 25.0 && lat <= 70.0 && lon >= -130.0 && lon <= -50.0 {
+            return Region::NorthAmerica;
+        }
+        
+        // Europe: lat 35-70, lon -10 to 40
+        if lat >= 35.0 && lat <= 70.0 && lon >= -10.0 && lon <= 40.0 {
+            return Region::Europe;
+        }
+        
+        // Asia Pacific: lat -50 to 50, lon 100 to 180 or -180 to -120
+        if lat >= -50.0 && lat <= 50.0 && ((lon >= 100.0 && lon <= 180.0) || (lon >= -180.0 && lon <= -120.0)) {
+            return Region::AsiaPacific;
+        }
+        
+        // South America: lat -60 to 15, lon -90 to -30
+        if lat >= -60.0 && lat <= 15.0 && lon >= -90.0 && lon <= -30.0 {
+            return Region::SouthAmerica;
+        }
+        
+        // Default to Other for locations outside defined bounds
+        Region::Other
+    }
+
     /// Initialize with default data centers (global distribution)
     pub fn init_default_data_centers(&mut self) {
         let dcs = vec![
-            ("US-East", Location::new(39.0, -77.0), "NA"),
-            ("US-West", Location::new(37.0, -122.0), "NA"),
-            ("US-Central", Location::new(41.0, -96.0), "NA"),
-            ("EU-West", Location::new(51.0, 0.0), "EU"),
-            ("EU-Central", Location::new(50.0, 8.0), "EU"),
-            ("EU-North", Location::new(59.0, 18.0), "EU"),
-            ("Asia-East", Location::new(35.0, 139.0), "APAC"),
-            ("Asia-SE", Location::new(1.0, 103.0), "APAC"),
-            ("Australia", Location::new(-33.0, 151.0), "APAC"),
-            ("South-America", Location::new(-23.0, -46.0), "SA"),
+            ("US-East", Location::new(39.0, -77.0), Region::NorthAmerica),
+            ("US-West", Location::new(37.0, -122.0), Region::NorthAmerica),
+            ("US-Central", Location::new(41.0, -96.0), Region::NorthAmerica),
+            ("EU-West", Location::new(51.0, 0.0), Region::Europe),
+            ("EU-Central", Location::new(50.0, 8.0), Region::Europe),
+            ("EU-North", Location::new(59.0, 18.0), Region::Europe),
+            ("Asia-East", Location::new(35.0, 139.0), Region::AsiaPacific),
+            ("Asia-SE", Location::new(1.0, 103.0), Region::AsiaPacific),
+            ("Australia", Location::new(-33.0, 151.0), Region::AsiaPacific),
+            ("South-America", Location::new(-23.0, -46.0), Region::SouthAmerica),
         ];
 
         for (i, (name, location, region)) in dcs.into_iter().enumerate() {
@@ -133,10 +168,14 @@ impl Simulation {
                 region_loc.lon + rng.gen_range(-15.0..15.0),
             );
 
+            // Determine region from location
+            let region = Self::region_from_location(location);
+
             // Generate skill using a normal-ish distribution
             let skill = self.generate_skill(&mut rng);
 
             let mut player = Player::new(self.next_player_id, location, skill);
+            player.region = region;
             self.next_player_id += 1;
 
             // Randomize platform and input
@@ -485,6 +524,7 @@ impl Simulation {
                     self.current_time,
                     &self.players,
                     &self.config,
+                    &self.data_centers,
                 );
 
                 self.next_search_id += 1;
@@ -502,7 +542,13 @@ impl Simulation {
         player.state = PlayerState::Searching;
         player.search_start_time = Some(self.current_time);
 
-        // Create search object
+        // Create search object with region-aware acceptable DCs
+        let wait_time = 0.0; // Initial wait time when search starts
+        let acceptable_dcs: HashSet<usize> = player
+            .acceptable_dcs(wait_time, &self.config, player.region, &self.data_centers)
+            .into_iter()
+            .collect();
+        
         let search = SearchObject {
             id: self.next_search_id,
             player_ids: vec![player_id],
@@ -521,7 +567,7 @@ impl Simulation {
             },
             acceptable_playlists: player.preferred_playlists.clone(),
             search_start_time: self.current_time,
-            acceptable_dcs: player.dc_pings.keys().copied().collect(),
+            acceptable_dcs,
         };
 
         self.next_search_id += 1;
@@ -629,6 +675,9 @@ impl Simulation {
             } else {
                 self.stats.solo_match_count += 1;
             }
+
+            // Track cross-region match
+            self.stats.cross_region_match_samples.push(result.is_cross_region);
 
             // Update player states
             for &player_id in &result.player_ids {
@@ -1230,6 +1279,9 @@ impl Simulation {
         // Calculate per-bucket statistics
         self.update_bucket_stats();
         
+        // Calculate regional statistics
+        self.update_region_stats();
+        
         // Calculate retention metrics
         self.update_retention_stats();
         
@@ -1487,6 +1539,82 @@ impl Simulation {
                 win_rate,
                 avg_kd,
                 matches_played: total_matches,
+            });
+        }
+    }
+
+    /// Update regional statistics
+    fn update_region_stats(&mut self) {
+        self.stats.region_stats.clear();
+        
+        // Group players by region
+        let mut players_by_region: HashMap<Region, Vec<&Player>> = HashMap::new();
+        for player in self.players.values() {
+            players_by_region
+                .entry(player.region)
+                .or_insert_with(Vec::new)
+                .push(player);
+        }
+        
+        // Calculate cross-region match rate
+        let cross_region_match_rate = if !self.stats.cross_region_match_samples.is_empty() {
+            self.stats.cross_region_match_samples.iter()
+                .filter(|&&is_cross| is_cross)
+                .count() as f64 / self.stats.cross_region_match_samples.len() as f64
+        } else {
+            0.0
+        };
+        
+        // Calculate stats per region
+        for (region, region_players) in players_by_region {
+            let player_count = region_players.len();
+            
+            // Calculate average search time for this region
+            let search_times: Vec<f64> = region_players.iter()
+                .flat_map(|p| p.recent_search_times.iter().copied())
+                .collect();
+            let avg_search_time = if !search_times.is_empty() {
+                search_times.iter().sum::<f64>() / search_times.len() as f64
+            } else {
+                0.0
+            };
+            
+            // Calculate average delta ping for this region
+            let delta_pings: Vec<f64> = region_players.iter()
+                .flat_map(|p| p.recent_delta_pings.iter().copied())
+                .collect();
+            let avg_delta_ping = if !delta_pings.is_empty() {
+                delta_pings.iter().sum::<f64>() / delta_pings.len() as f64
+            } else {
+                0.0
+            };
+            
+            // Count active matches in this region
+            let active_matches = self.matches.values()
+                .filter(|m| {
+                    // Check if any player in this match is from this region
+                    m.teams.iter()
+                        .flatten()
+                        .any(|&pid| {
+                            self.players.get(&pid)
+                                .map(|p| p.region == region)
+                                .unwrap_or(false)
+                        })
+                })
+                .count();
+            
+            // Calculate blowout rate for this region
+            // We need to track blowouts per region - for now, use overall blowout rate
+            // TODO: Could track per-region blowout counts if needed
+            let blowout_rate = self.stats.blowout_rate;
+            
+            self.stats.region_stats.insert(region, RegionStats {
+                player_count,
+                avg_search_time,
+                avg_delta_ping,
+                blowout_rate,
+                active_matches,
+                cross_region_match_rate,
             });
         }
     }
