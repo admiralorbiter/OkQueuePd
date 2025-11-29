@@ -22,8 +22,9 @@
 - **Regional Analysis**: Region adjacency graph, region-aware backoff, per-region configuration overrides, and cross-region match tracking
 
 ### Research Tools
-- **Comprehensive Experiment Runner**: Single and multi-parameter sweeps with non-blocking execution
-- **Experiment Library**: Storage, search, filtering, tags, and CRUD operations with localStorage persistence
+- **Comprehensive Experiment Runner**: Single and multi-parameter sweeps executed in a Web Worker so the UI stays responsive
+- **Experiment Library**: Storage, search, filtering, tags, and CRUD operations backed by SQLite (`sql.js` + OPFS) with checkpointed progress and resume support
+- **Running Experiments View**: Shows any in-flight sweeps with live progress and last-saved checkpoint information
 - **Experiment Comparison**: Side-by-side comparison of 2-4 experiments with metric overlays
 - **Scenario Presets**: Built-in presets for SBMM, retention, regional, party, and evolution experiments
 - **Export/Import**: JSON export/import for experiment sharing and archival
@@ -53,6 +54,17 @@ npm run dev
 ```
 
 Then open http://localhost:3000 in your browser.
+
+### Experiment Persistence & Resume (Web)
+
+The web frontend treats experiments as first-class objects stored in a client-side SQLite database:
+
+- **SQLite + OPFS**: Experiments, checkpoints, and per-run results are persisted using `sql.js` and the Origin Private File System, so runs survive reloads.
+- **Checkpoints**: After each parameter value is run, a checkpoint is written containing the current progress and partial results.
+- **Resume Flow**:
+  - On reload, any experiments still marked `running` are automatically downgraded to `paused` (since the worker is gone).\n
+  - The **Resume Incomplete Experiments** panel lets you pick a paused/partial experiment and continue from the last completed run.
+- **Navigation**: Closing the tab or navigating away stops the worker, but your progress up to the last completed run is preserved and can be resumed later.
 
 ## 🦀 Building the Rust/WASM Engine (Optional)
 

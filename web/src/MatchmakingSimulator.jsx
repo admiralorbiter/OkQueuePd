@@ -4,6 +4,8 @@ import init, { SimulationEngine } from './wasm/cod_matchmaking_sim.js';
 import ExperimentRunner from './components/Experiments/ExperimentRunner';
 import ExperimentLibrary from './components/Experiments/ExperimentLibrary';
 import ExperimentComparison from './components/Experiments/ExperimentComparison';
+import { initDatabase } from './utils/Database';
+import { needsMigration, migrateLocalStorageToSQLite } from './utils/ExperimentStorage';
 import { saveExperiment } from './utils/ExperimentStorage';
 
 // ============================================================================
@@ -139,6 +141,45 @@ export default function MatchmakingSimulator() {
   const [regionConfigExpanded, setRegionConfigExpanded] = useState(false);
   const [comparisonExperiments, setComparisonExperiments] = useState([]);
   const animationRef = useRef(null);
+
+  // Initialize database and migrate if needed
+  useEffect(() => {
+    let mounted = true;
+    
+    const initializeDatabase = async () => {
+      try {
+        // Initialize database
+        await initDatabase();
+
+        // Check for migration
+        if (needsMigration()) {
+          const result = await migrateLocalStorageToSQLite();
+          if (result.errors.length > 0) {
+            console.warn('Migration errors:', result.errors);
+          }
+        }
+        
+        // Mark any "running" experiments as "paused" since they're not actually running
+        // (the worker was terminated when the page reloaded)
+        const { getIncompleteExperiments } = await import('./utils/ExperimentStorage');
+        const { updateExperimentStatus } = await import('./utils/Database');
+        const incomplete = await getIncompleteExperiments();
+        const runningExperiments = incomplete.filter(exp => exp.status === 'running');
+        for (const exp of runningExperiments) {
+          await updateExperimentStatus(exp.id, 'paused');
+        }
+      } catch (error) {
+        console.error('Failed to initialize database:', error);
+        // Continue without database (will use in-memory fallback)
+      }
+    };
+    
+    initializeDatabase();
+    
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   // Initialize WASM on mount
   useEffect(() => {

@@ -4,6 +4,7 @@ import { useExperimentRunner } from '../../hooks/useExperimentRunner';
 import { saveExperiment, generateExperimentId } from '../../utils/ExperimentStorage';
 import { formatExperimentName, estimateExperimentDuration } from '../../utils/ExperimentUtils';
 import { getBuiltinPresets, applyPreset } from '../../utils/ScenarioPresets';
+import ResumeExperimentDialog from './ResumeExperimentDialog';
 // Colors matching the main app
 const COLORS = {
   primary: '#00d4aa',
@@ -52,13 +53,17 @@ export default function ExperimentRunner({
 
   const {
     running,
+    paused,
     progress,
     currentRun,
     results,
+    workerReady,
     runSingleParamSweep,
     runMultiParamSweep,
     runExperimentFromConfig,
     cancelExperiment,
+    pauseExperiment,
+    resumeExperiment,
     resetExperiment,
   } = useExperimentRunner(wasmReady, SimulationEngine, convertConfigToRust);
 
@@ -187,11 +192,60 @@ export default function ExperimentRunner({
     { value: 'partyPlayerFraction', label: 'Party Player Fraction' },
   ];
 
+  const handleResumeExperiment = async (experiment, checkpointInfo) => {
+    try {
+      resetExperiment();
+      
+      // Set experiment options from saved experiment
+      if (experiment.config?.fixed) {
+        setExperimentOptions(prev => ({
+          ...prev,
+          ticks: experiment.config.fixed.ticks || 500,
+          seed: experiment.config.fixed.seed || 42,
+        }));
+      }
+
+      // Resume based on experiment type
+      if (experiment.type === 'single_param' && experiment.config?.varied) {
+        await runSingleParamSweep(
+          experiment.config.varied.parameter,
+          experiment.config.varied.values,
+          experiment.config.base,
+          {
+            ...experimentOptions,
+            experimentId: experiment.id,
+            resume: true,
+          }
+        );
+      } else if (experiment.type === 'multi_param' && experiment.config?.varied) {
+        await runMultiParamSweep(
+          experiment.config.varied.parameters,
+          experiment.config.varied.valueGrids,
+          experiment.config.base,
+          {
+            ...experimentOptions,
+            experimentId: experiment.id,
+            resume: true,
+          }
+        );
+      }
+    } catch (error) {
+      console.error('Failed to resume experiment:', error);
+      alert(`Failed to resume experiment: ${error.message}`);
+    }
+  };
+
   return (
     <div style={{ padding: '1rem' }}>
       <h3 style={{ fontSize: '1rem', color: COLORS.text, marginBottom: '1rem' }}>
         Experiment Runner
       </h3>
+
+      {/* Resume Dialog */}
+      <ResumeExperimentDialog
+        onResume={handleResumeExperiment}
+        onClose={() => {}}
+      />
 
       {/* Experiment Type Selection */}
       <div style={{ marginBottom: '1rem' }}>
@@ -543,41 +597,73 @@ export default function ExperimentRunner({
               )}
             </div>
           )}
-          <button
-            onClick={cancelExperiment}
-            style={{
-              marginTop: '0.75rem',
-              padding: '0.5rem 1rem',
-              background: COLORS.danger,
-              border: 'none',
-              borderRadius: '4px',
-              color: COLORS.text,
-              cursor: 'pointer',
-              fontSize: '0.75rem',
-            }}
-          >
-            Cancel
-          </button>
+          <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.75rem' }}>
+            {!paused ? (
+              <button
+                onClick={pauseExperiment}
+                style={{
+                  padding: '0.5rem 1rem',
+                  background: COLORS.warning,
+                  border: 'none',
+                  borderRadius: '4px',
+                  color: COLORS.text,
+                  cursor: 'pointer',
+                  fontSize: '0.75rem',
+                }}
+              >
+                Pause
+              </button>
+            ) : (
+              <button
+                onClick={resumeExperiment}
+                style={{
+                  padding: '0.5rem 1rem',
+                  background: COLORS.success,
+                  border: 'none',
+                  borderRadius: '4px',
+                  color: COLORS.text,
+                  cursor: 'pointer',
+                  fontSize: '0.75rem',
+                }}
+              >
+                Resume
+              </button>
+            )}
+            <button
+              onClick={cancelExperiment}
+              style={{
+                padding: '0.5rem 1rem',
+                background: COLORS.danger,
+                border: 'none',
+                borderRadius: '4px',
+                color: COLORS.text,
+                cursor: 'pointer',
+                fontSize: '0.75rem',
+              }}
+            >
+              Cancel
+            </button>
+          </div>
         </div>
       )}
 
       {/* Run Button */}
       <button
         onClick={handleRunExperiment}
-        disabled={running || !wasmReady || (experimentType === 'preset' && !selectedPreset)}
+        disabled={running || !wasmReady || !workerReady || (experimentType === 'preset' && !selectedPreset)}
         style={{
           width: '100%',
           padding: '0.75rem',
-          background: running || !wasmReady || (experimentType === 'preset' && !selectedPreset) ? COLORS.darker : COLORS.primary,
+          background: running || !wasmReady || !workerReady || (experimentType === 'preset' && !selectedPreset) ? COLORS.darker : COLORS.primary,
           border: 'none',
           borderRadius: '4px',
-          color: running || !wasmReady || (experimentType === 'preset' && !selectedPreset) ? COLORS.textMuted : COLORS.dark,
-          cursor: running || !wasmReady || (experimentType === 'preset' && !selectedPreset) ? 'not-allowed' : 'pointer',
+          color: running || !wasmReady || !workerReady || (experimentType === 'preset' && !selectedPreset) ? COLORS.textMuted : COLORS.dark,
+          cursor: running || !wasmReady || !workerReady || (experimentType === 'preset' && !selectedPreset) ? 'not-allowed' : 'pointer',
           fontSize: '0.85rem',
           fontWeight: 600,
         }}
       >
-        {running ? 'Running...' : 'Run Experiment'}
+        {running ? (paused ? 'Paused...' : 'Running...') : (!workerReady ? 'Initializing Worker...' : 'Run Experiment')}
       </button>
     </div>
   );

@@ -68,6 +68,47 @@ export default function ExperimentDetails({
     ? experiment.config?.varied?.parameter 
     : experiment.config?.varied?.parameters?.[0];
 
+  // Determine which metrics are available across all runs
+  const BASIC_METRIC_KEYS = [
+    'avgSearchTime',
+    'avgDeltaPing',
+    'avgSkillDisparity',
+    'blowoutRate',
+  ];
+
+  const allMetricKeys = experiment.results && experiment.results.length > 0
+    ? Array.from(new Set(
+        experiment.results.flatMap(r => Object.keys(r.metrics || {}))
+      ))
+    : [];
+
+  // Extra metrics = anything beyond the core ones we already chart/table
+  const extraMetricKeys = allMetricKeys.filter(
+    (key) => !BASIC_METRIC_KEYS.includes(key)
+  );
+
+  const formatMetricValue = (value) => {
+    if (value === null || value === undefined) return '—';
+    if (typeof value === 'number') {
+      // Heuristic formatting: small numbers with more precision, others with 2 decimals
+      if (Math.abs(value) < 0.01) return value.toExponential(2);
+      if (Math.abs(value) < 10) return value.toFixed(4);
+      return value.toFixed(2);
+    }
+    if (typeof value === 'boolean') return value ? 'true' : 'false';
+    if (typeof value === 'string') return value;
+    // Objects/arrays: JSON stringify but truncate for readability
+    try {
+      const json = JSON.stringify(value);
+      if (json.length > 80) {
+        return json.slice(0, 77) + '…';
+      }
+      return json;
+    } catch {
+      return String(value);
+    }
+  };
+
   return (
     <div>
       {/* Header */}
@@ -316,6 +357,65 @@ export default function ExperimentDetails({
                     <td style={{ padding: '0.5rem', color: COLORS.text, textAlign: 'right' }}>
                       {((result.metrics?.blowoutRate || 0) * 100).toFixed(1)}%
                     </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {experiment.results.length > 50 && (
+              <div style={{ marginTop: '0.5rem', fontSize: '0.7rem', color: COLORS.textMuted, textAlign: 'center' }}>
+                Showing first 50 of {experiment.results.length} results
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Detailed Metrics (dynamic) */}
+      {experiment.results && experiment.results.length > 0 && extraMetricKeys.length > 0 && (
+        <div style={{ 
+          marginTop: '1rem', 
+          padding: '1rem', 
+          background: COLORS.card, 
+          borderRadius: '8px' 
+        }}>
+          <h4 style={{ fontSize: '0.85rem', color: COLORS.text, marginBottom: '0.75rem' }}>
+            Detailed Metrics (per run)
+          </h4>
+          <div style={{ overflowX: 'auto', maxHeight: '400px', overflowY: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.7rem' }}>
+              <thead style={{ position: 'sticky', top: 0, background: COLORS.darker }}>
+                <tr>
+                  {experiment.type === 'single_param' && (
+                    <th style={{ padding: '0.5rem', color: COLORS.textMuted, textAlign: 'left', borderBottom: `1px solid ${COLORS.border}` }}>
+                      {paramName || 'Value'}
+                    </th>
+                  )}
+                  {extraMetricKeys.map((key) => (
+                    <th
+                      key={key}
+                      style={{ padding: '0.5rem', color: COLORS.textMuted, textAlign: 'right', borderBottom: `1px solid ${COLORS.border}` }}
+                    >
+                      {key}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {experiment.results.slice(0, 50).map((result, index) => (
+                  <tr key={index} style={{ borderBottom: `1px solid ${COLORS.border}33` }}>
+                    {experiment.type === 'single_param' && (
+                      <td style={{ padding: '0.5rem', color: COLORS.text }}>
+                        {typeof result.value === 'number' ? result.value.toFixed(3) : result.value}
+                      </td>
+                    )}
+                    {extraMetricKeys.map((key) => (
+                      <td
+                        key={key}
+                        style={{ padding: '0.5rem', color: COLORS.text, textAlign: 'right' }}
+                      >
+                        {formatMetricValue(result.metrics?.[key])}
+                      </td>
+                    ))}
                   </tr>
                 ))}
               </tbody>

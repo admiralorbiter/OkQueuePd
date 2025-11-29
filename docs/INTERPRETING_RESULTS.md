@@ -18,6 +18,11 @@ The simulation produces a wide variety of metrics that capture different aspects
 - What indicates good vs. problematic results
 - How metrics relate to each other
 
+On the web UI, these metrics surface in three main places on the experiment details page:
+- **Key Metrics chart** – shows a small set of high-signal metrics (search time, delta ping, skill disparity, blowout rate) vs. the swept parameter.
+- **Results table** – mirrors those key metrics as a per-run table for quick inspection.
+- **Detailed Metrics table** – dynamically shows *all* additional metric fields that were collected when **Collect Detailed Metrics** was enabled (including retention metrics, percentile stats, regional aggregates, etc.). If no extra fields exist for a given experiment, this section is hidden.
+
 **Key Principles:**
 - **No single metric tells the whole story** - Always consider multiple metrics together
 - **Context matters** - Good values depend on your configuration and goals

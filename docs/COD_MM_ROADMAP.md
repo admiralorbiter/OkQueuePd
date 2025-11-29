@@ -50,12 +50,14 @@ This roadmap guides the implementation of a full agent-based matchmaking simulat
   - Frontend region-split charts and region filter dropdown
   - Per-region config UI panel
 - ✅ **Slice G: Frontend Experiment Runner & Visualizations**
-  - Comprehensive experiment storage system with localStorage persistence
+  - Comprehensive experiment storage system backed by SQLite (`sql.js` + OPFS) with checkpointed progress and resume support
+  - Web Worker–based experiment execution so long sweeps run off the main thread
   - Enhanced experiment runner supporting single and multi-parameter sweeps
   - Scenario preset system with built-in presets (SBMM, retention, regional, party, evolution)
   - Experiment library with search, filtering, tags, and CRUD operations
   - Side-by-side experiment comparison tool (2-4 experiments)
   - Export/import experiments as JSON files
+  - Running-experiments panel showing live progress for in-flight sweeps
   - Progress tracking with non-blocking execution (optimized to prevent UI freezing)
   - Reusable chart components (MetricChart, ComparisonChart, HeatmapChart)
   - Experiment builder UI for visual configuration

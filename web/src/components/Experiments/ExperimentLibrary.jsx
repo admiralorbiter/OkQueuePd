@@ -8,6 +8,7 @@ import {
   downloadExperiment,
   downloadAllExperiments,
   getStorageStats,
+  getRunningExperimentsWithProgress,
 } from '../../utils/ExperimentStorage';
 import ExperimentCard from './ExperimentCard';
 import ExperimentDetails from './ExperimentDetails';
@@ -21,6 +22,7 @@ const COLORS = {
   border: '#1e3a5f',
   card: '#111827',
   darker: '#060912',
+  warning: '#f59e0b',
 };
 
 export default function ExperimentLibrary({ onExperimentSelect, onCompare }) {
@@ -37,31 +39,75 @@ export default function ExperimentLibrary({ onExperimentSelect, onCompare }) {
   const [filterStatus, setFilterStatus] = useState('');
   const [sortBy, setSortBy] = useState('timestamp');
   const [sortOrder, setSortOrder] = useState('desc');
-  
-  const allTags = getAllTags();
+  const [allTags, setAllTags] = useState([]);
+  const [runningExperiments, setRunningExperiments] = useState([]);
 
-  // Load experiments
+  // Load running experiments and refresh periodically
   useEffect(() => {
-    refreshExperiments();
+    const loadRunningExperiments = async () => {
+      try {
+        const running = await getRunningExperimentsWithProgress();
+        console.log('Loaded running experiments:', running);
+        setRunningExperiments(running || []);
+      } catch (error) {
+        console.error('Error loading running experiments:', error);
+        setRunningExperiments([]);
+      }
+    };
+
+    // Load immediately
+    loadRunningExperiments();
+
+    // Refresh every 2 seconds
+    const interval = setInterval(() => {
+      loadRunningExperiments();
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  // Load experiments and tags
+  useEffect(() => {
+    const loadData = async () => {
+      await refreshExperiments();
+      const tags = await getAllTags();
+      setAllTags(tags || []);
+    };
+    loadData();
   }, []);
 
   // Apply filters
   useEffect(() => {
-    const filtered = listExperiments({
-      search: searchQuery || undefined,
-      tags: filterTags.length > 0 ? filterTags : undefined,
-      type: filterType || undefined,
-      status: filterStatus || undefined,
-      sortBy,
-      sortOrder,
-    });
-    setFilteredExperiments(filtered);
+    const applyFilters = async () => {
+      const filtered = await listExperiments({
+        search: searchQuery || undefined,
+        tags: filterTags.length > 0 ? filterTags : undefined,
+        type: filterType || undefined,
+        status: filterStatus || undefined,
+        sortBy,
+        sortOrder,
+      });
+      setFilteredExperiments(filtered || []);
+    };
+    applyFilters();
   }, [searchQuery, filterTags, filterType, filterStatus, sortBy, sortOrder, experiments]);
 
-  const refreshExperiments = () => {
-    const exps = listExperiments({ sortBy, sortOrder });
-    setExperiments(exps);
-    setFilteredExperiments(exps);
+  // Refresh running experiments
+  const refreshRunningExperiments = async () => {
+    try {
+      const running = await getRunningExperimentsWithProgress();
+      setRunningExperiments(running || []);
+    } catch (error) {
+      console.error('Error loading running experiments:', error);
+    }
+  };
+
+  const refreshExperiments = async () => {
+    const exps = await listExperiments({ sortBy, sortOrder });
+    setExperiments(exps || []);
+    setFilteredExperiments(exps || []);
+    // Also refresh running experiments
+    await refreshRunningExperiments();
   };
 
   const handleDelete = (id) => {
@@ -129,6 +175,119 @@ export default function ExperimentLibrary({ onExperimentSelect, onCompare }) {
 
   return (
     <div style={{ padding: '1rem' }}>
+      {/* Running Experiments Section */}
+      {runningExperiments && runningExperiments.length > 0 && (
+        <div style={{ 
+          marginBottom: '1.5rem', 
+          padding: '1rem', 
+          background: COLORS.darker, 
+          borderRadius: '8px',
+          border: `1px solid ${COLORS.border}`,
+        }}>
+          <div style={{ 
+            display: 'flex', 
+            justifyContent: 'space-between', 
+            alignItems: 'center', 
+            marginBottom: '1rem' 
+          }}>
+            <h4 style={{ fontSize: '0.9rem', color: COLORS.text, margin: 0 }}>
+              Running Experiments ({runningExperiments.length})
+            </h4>
+            <button
+              onClick={refreshRunningExperiments}
+              style={{
+                padding: '0.25rem 0.5rem',
+                background: COLORS.card,
+                border: `1px solid ${COLORS.border}`,
+                borderRadius: '4px',
+                color: COLORS.text,
+                cursor: 'pointer',
+                fontSize: '0.7rem',
+              }}
+            >
+              Refresh
+            </button>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            {runningExperiments.map(exp => (
+              <div
+                key={exp.id}
+                style={{
+                  padding: '0.75rem',
+                  background: COLORS.card,
+                  border: `1px solid ${COLORS.border}`,
+                  borderRadius: '4px',
+                }}
+              >
+                <div style={{ 
+                  display: 'flex', 
+                  justifyContent: 'space-between', 
+                  alignItems: 'center',
+                  marginBottom: '0.5rem',
+                }}>
+                  <div>
+                    <div style={{ fontSize: '0.85rem', color: COLORS.text, fontWeight: 500 }}>
+                      {exp.name || `Experiment ${exp.id.substring(0, 8)}`}
+                    </div>
+                    <div style={{ fontSize: '0.7rem', color: COLORS.textMuted, marginTop: '0.25rem' }}>
+                      Type: {exp.type} | Status: <span style={{ 
+                        color: exp.status === 'running' ? COLORS.primary : '#f59e0b' 
+                      }}>
+                        {exp.status.toUpperCase()}
+                      </span>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: '0.7rem', color: COLORS.textMuted }}>
+                    {exp.checkpoint && (
+                      <span>Last saved: {new Date(exp.checkpoint.lastSaved).toLocaleTimeString()}</span>
+                    )}
+                  </div>
+                </div>
+                
+                {/* Progress Bar */}
+                <div style={{ marginBottom: '0.5rem' }}>
+                  <div style={{ 
+                    display: 'flex', 
+                    justifyContent: 'space-between', 
+                    marginBottom: '0.25rem',
+                    fontSize: '0.7rem',
+                    color: COLORS.textMuted,
+                  }}>
+                    <span>Progress: {Math.round(exp.progress)}%</span>
+                    {exp.totalRuns > 0 ? (
+                      <span>Run {exp.currentRun} of {exp.totalRuns}</span>
+                    ) : (
+                      <span>{exp.currentRun} runs completed</span>
+                    )}
+                  </div>
+                  <div style={{ 
+                    width: '100%', 
+                    height: '8px', 
+                    background: COLORS.darker, 
+                    borderRadius: '4px', 
+                    overflow: 'hidden' 
+                  }}>
+                    <div style={{ 
+                      width: `${Math.min(100, Math.max(0, exp.progress))}%`, 
+                      height: '100%', 
+                      background: exp.status === 'running' ? COLORS.primary : '#f59e0b',
+                      transition: 'width 0.3s',
+                    }} />
+                  </div>
+                </div>
+
+                {/* Additional Info */}
+                {exp.checkpoint && exp.checkpoint.resultsCount > 0 && (
+                  <div style={{ fontSize: '0.7rem', color: COLORS.textMuted }}>
+                    {exp.checkpoint.resultsCount} result{exp.checkpoint.resultsCount !== 1 ? 's' : ''} saved
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
         <h3 style={{ fontSize: '1rem', color: COLORS.text, margin: 0 }}>
           Experiment Library
