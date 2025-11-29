@@ -1,6 +1,10 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ScatterChart, Scatter, Cell, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar } from 'recharts';
 import init, { SimulationEngine } from './wasm/cod_matchmaking_sim.js';
+import ExperimentRunner from './components/Experiments/ExperimentRunner';
+import ExperimentLibrary from './components/Experiments/ExperimentLibrary';
+import ExperimentComparison from './components/Experiments/ExperimentComparison';
+import { saveExperiment } from './utils/ExperimentStorage';
 
 // ============================================================================
 // SIMULATION ENGINE (JavaScript implementation mirroring the Rust code)
@@ -133,6 +137,7 @@ export default function MatchmakingSimulator() {
   const [regionStats, setRegionStats] = useState({});
   const [selectedRegion, setSelectedRegion] = useState('All');
   const [regionConfigExpanded, setRegionConfigExpanded] = useState(false);
+  const [comparisonExperiments, setComparisonExperiments] = useState([]);
   const animationRef = useRef(null);
 
   // Initialize WASM on mount
@@ -1090,7 +1095,7 @@ export default function MatchmakingSimulator() {
         <main style={{ flex: 1, padding: '1rem', overflowY: 'auto' }}>
           {/* Tabs */}
           <div style={{ display: 'flex', gap: '0.25rem', marginBottom: '1rem' }}>
-            {['overview', 'distributions', 'buckets', 'experiments'].map(tab => (
+            {['overview', 'distributions', 'buckets', 'experiments', 'experiment-library', ...(comparisonExperiments.length > 0 ? ['comparison'] : [])].map(tab => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
@@ -2082,75 +2087,42 @@ export default function MatchmakingSimulator() {
 
           {/* Experiments Tab */}
           {activeTab === 'experiments' && (
-            <div>
-              <div style={{ background: COLORS.card, border: `1px solid ${COLORS.border}`, borderRadius: '8px', padding: '1rem', marginBottom: '1rem' }}>
-                <h4 style={{ fontSize: '0.85rem', color: COLORS.text, marginBottom: '0.5rem' }}>Research Experiments</h4>
-                <p style={{ fontSize: '0.75rem', color: COLORS.textMuted, marginBottom: '1rem' }}>
-                  Run parameter sweeps to explore tradeoffs between search time, ping quality, skill matching, and fairness.
-                  Use the experiment buttons in the sidebar to run a sweep, then analyze results here.
-                </p>
-                
-                {!experimentResults && (
-                  <div style={{ padding: '2rem', textAlign: 'center', color: COLORS.textMuted }}>
-                    <p>No experiment results yet. Run an experiment from the sidebar.</p>
-                    <p style={{ fontSize: '0.7rem', marginTop: '0.5rem' }}>
-                      Try "Sweep: Skill Strictness" to see how SBMM intensity affects metrics.
-                    </p>
-                  </div>
-                )}
-              </div>
+            <ExperimentRunner
+              wasmReady={wasmReady}
+              SimulationEngine={SimulationEngine}
+              convertConfigToRust={convertConfigToRust}
+              baseConfig={config}
+              population={population}
+              onExperimentComplete={(experiment) => {
+                console.log('Experiment completed:', experiment);
+                // Optionally refresh or navigate
+              }}
+            />
+          )}
 
-              {experimentResults && (
-                <>
-                  <div style={{ background: COLORS.card, border: `1px solid ${COLORS.border}`, borderRadius: '8px', padding: '1rem', marginBottom: '0.75rem' }}>
-                    <h4 style={{ fontSize: '0.75rem', color: COLORS.textMuted, marginBottom: '0.5rem' }}>
-                      PARAMETER SWEEP: {experimentResults.param}
-                    </h4>
-                    <ResponsiveContainer width="100%" height={300}>
-                      <LineChart data={experimentResults.data}>
-                        <CartesianGrid strokeDasharray="3 3" stroke={COLORS.border} />
-                        <XAxis dataKey="value" tick={{ fill: COLORS.textMuted, fontSize: 10 }} label={{ value: experimentResults.param, position: 'insideBottom', offset: -5, fill: COLORS.textMuted }} />
-                        <YAxis tick={{ fill: COLORS.textMuted, fontSize: 10 }} />
-                        <Tooltip contentStyle={{ background: COLORS.card, border: `1px solid ${COLORS.border}` }} />
-                        <Legend />
-                        <Line type="monotone" dataKey="avgSearchTime" name="Search Time (s)" stroke={COLORS.tertiary} strokeWidth={2} />
-                        <Line type="monotone" dataKey="avgDeltaPing" name="Delta Ping (ms)" stroke={COLORS.secondary} strokeWidth={2} />
-                        <Line type="monotone" dataKey="avgSkillDisparity" name="Skill Disparity" stroke={COLORS.primary} strokeWidth={2} />
-                        <Line type="monotone" dataKey="blowoutRate" name="Blowout Rate (%)" stroke={COLORS.warning} strokeWidth={2} />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </div>
+          {/* Experiment Library Tab */}
+          {activeTab === 'experiment-library' && (
+            <ExperimentLibrary
+              onExperimentSelect={(experiment) => {
+                // Could open in details view or comparison
+                console.log('Selected experiment:', experiment);
+              }}
+              onCompare={(experiments) => {
+                setComparisonExperiments(experiments);
+                setActiveTab('comparison');
+              }}
+            />
+          )}
 
-                  <div style={{ background: COLORS.card, border: `1px solid ${COLORS.border}`, borderRadius: '8px', padding: '1rem' }}>
-                    <h4 style={{ fontSize: '0.75rem', color: COLORS.textMuted, marginBottom: '0.5rem' }}>EXPERIMENT DATA TABLE</h4>
-                    <div style={{ overflowX: 'auto' }}>
-                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.75rem' }}>
-                        <thead>
-                          <tr style={{ borderBottom: `1px solid ${COLORS.border}` }}>
-                            <th style={{ textAlign: 'left', padding: '0.5rem', color: COLORS.textMuted }}>Value</th>
-                            <th style={{ textAlign: 'right', padding: '0.5rem', color: COLORS.textMuted }}>Search Time</th>
-                            <th style={{ textAlign: 'right', padding: '0.5rem', color: COLORS.textMuted }}>Delta Ping</th>
-                            <th style={{ textAlign: 'right', padding: '0.5rem', color: COLORS.textMuted }}>Skill Disparity</th>
-                            <th style={{ textAlign: 'right', padding: '0.5rem', color: COLORS.textMuted }}>Blowout Rate</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {experimentResults.data.map((row, i) => (
-                            <tr key={i} style={{ borderBottom: `1px solid ${COLORS.border}22` }}>
-                              <td style={{ padding: '0.5rem' }}>{row.value.toFixed(3)}</td>
-                              <td style={{ padding: '0.5rem', textAlign: 'right' }}>{row.avgSearchTime.toFixed(1)}s</td>
-                              <td style={{ padding: '0.5rem', textAlign: 'right' }}>{row.avgDeltaPing.toFixed(1)}ms</td>
-                              <td style={{ padding: '0.5rem', textAlign: 'right' }}>{row.avgSkillDisparity.toFixed(4)}</td>
-                              <td style={{ padding: '0.5rem', textAlign: 'right' }}>{row.blowoutRate.toFixed(1)}%</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </>
-              )}
-            </div>
+          {/* Comparison Tab */}
+          {activeTab === 'comparison' && comparisonExperiments.length > 0 && (
+            <ExperimentComparison
+              experiments={comparisonExperiments}
+              onClose={() => {
+                setComparisonExperiments([]);
+                setActiveTab('experiment-library');
+              }}
+            />
           )}
         </main>
       </div>
